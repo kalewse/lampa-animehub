@@ -2,29 +2,36 @@
   'use strict';
 
   /* =======================================================
-   * AnimeHub for Lampa V0.1.0
+   * AnimeHub for Lampa V0.2.0
    * -------------------------------------------------------
-   * Shikimori-powered read-only anime catalogue.
+   * Shikimori catalogue + AnimeVost episode playback.
    * Designed for TV/LG WebOS remote navigation.
    *
-   * IMPORTANT:
-   * After deploying the Cloudflare Worker, replace WORKER
-   * below with your real workers.dev URL.
+   * V0.2.0 adds:
+   * - Native Lampa playback (no AnimeVost webpage/iframe).
+   * - Episode picker + player playlist / next / previous.
+   * - Local watched episode / resume position tracking.
+   * - Safer provider matching with manual candidate fallback.
+   * - Lighter TV rendering, lazy images and short client cache.
    * ===================================================== */
 
-  var VERSION = '0.1.0';
-  var NS = 'animehub_v010';
+  var VERSION = '0.2.0';
+  var NS = 'animehub_v020';
   var FLAG = NS + '_ready';
   var HOME = NS + '_home';
   var CATALOG = NS + '_catalog';
   var DETAIL = NS + '_detail';
-  var FAVORITES_KEY = NS + '_favorites';
-  var RECENT_KEY = NS + '_recent';
 
-  /* CHANGE THIS after Cloudflare deployment. Keep the final slash. */
+  /* Keep V0.1 storage keys so existing favourites/recent items survive upgrade. */
+  var FAVORITES_KEY = 'animehub_v010_favorites';
+  var RECENT_KEY = 'animehub_v010_recent';
+  var WATCH_KEY = 'animehub_v020_watch';
+
+  /* Cloudflare Worker URL. Keep the final slash. */
   var WORKER = 'https://animehub-lampa.kalewse69.workers.dev/';
 
   var genresCache = null;
+  var memoryCache = {};
 
   /* =======================================================
    * Basics
@@ -133,6 +140,7 @@
   function requestJson(network, url, success, failure) {
     network.silent(
       url,
+
       function (response) {
         var data = parseJson(response);
 
@@ -175,6 +183,73 @@
       {
         dataType: 'text'
       }
+    );
+  }
+
+  function cacheGet(key, maxAge) {
+    var item = memoryCache[key];
+
+    if (
+      !item ||
+      !item.time ||
+      (Date.now() - item.time) > maxAge
+    ) {
+      return null;
+    }
+
+    return item.data;
+  }
+
+  function cacheSet(key, data) {
+    memoryCache[key] = {
+      time: Date.now(),
+      data: data
+    };
+  }
+
+  function requestCachedJson(
+    network,
+    cacheKey,
+    maxAge,
+    url,
+    success,
+    failure
+  ) {
+    var cached =
+      cacheGet(
+        cacheKey,
+        maxAge
+      );
+
+    if (cached) {
+      setTimeout(
+        function () {
+          if (typeof success === 'function') {
+            success(cached);
+          }
+        },
+        0
+      );
+
+      return;
+    }
+
+    requestJson(
+      network,
+      url,
+
+      function (data) {
+        cacheSet(
+          cacheKey,
+          data
+        );
+
+        if (typeof success === 'function') {
+          success(data);
+        }
+      },
+
+      failure
     );
   }
 
@@ -274,8 +349,7 @@
       return '';
     }
 
-    var source =
-      String(value);
+    var source = String(value);
 
     var match =
       source.match(
@@ -322,15 +396,13 @@
   function episodeText(item) {
     var total =
       toInt(
-        item &&
-        item.episodes,
+        item && item.episodes,
         0
       );
 
     var aired =
       toInt(
-        item &&
-        item.episodesAired,
+        item && item.episodesAired,
         0
       );
 
@@ -339,25 +411,15 @@
       aired > 0 &&
       aired < total
     ) {
-      return (
-        aired +
-        ' / ' +
-        total
-      );
+      return aired + ' / ' + total;
     }
 
     if (total > 0) {
-      return (
-        total +
-        ' сер.'
-      );
+      return total + ' сер.';
     }
 
     if (aired > 0) {
-      return (
-        aired +
-        ' сер.'
-      );
+      return aired + ' сер.';
     }
 
     return '';
@@ -370,9 +432,7 @@
   function toriiSvg(className) {
     return (
       '<svg class="' +
-      escapeHtml(
-        className || ''
-      ) +
+      escapeHtml(className || '') +
       '" viewBox="0 0 96 96" ' +
       'xmlns="http://www.w3.org/2000/svg" ' +
       'aria-hidden="true">' +
@@ -431,9 +491,7 @@
 
         '<div class="ah-loader-icon">' +
           '<div class="ah-loader-ring"></div>' +
-          toriiSvg(
-            'ah-loader-torii'
-          ) +
+          toriiSvg('ah-loader-torii') +
           '<span class="ah-petal ah-petal-a">◆</span>' +
           '<span class="ah-petal ah-petal-b">◆</span>' +
           '<span class="ah-petal ah-petal-c">◆</span>' +
@@ -477,81 +535,68 @@
     return {
       id:
         String(
-          item &&
-          item.id
+          item && item.id
             ? item.id
             : ''
         ),
 
       title:
-        item &&
-        item.title
+        item && item.title
           ? item.title
           : 'Anime',
 
       name:
-        item &&
-        item.name
+        item && item.name
           ? item.name
           : '',
 
       russian:
-        item &&
-        item.russian
+        item && item.russian
           ? item.russian
           : '',
 
       english:
-        item &&
-        item.english
+        item && item.english
           ? item.english
           : '',
 
       poster:
-        item &&
-        item.poster
+        item && item.poster
           ? item.poster
           : '',
 
       score:
-        item &&
-        item.score
+        item && item.score
           ? item.score
           : 0,
 
       kind:
-        item &&
-        item.kind
+        item && item.kind
           ? item.kind
           : '',
 
       status:
-        item &&
-        item.status
+        item && item.status
           ? item.status
           : '',
 
       episodes:
-        item &&
-        item.episodes
+        item && item.episodes
           ? item.episodes
           : 0,
 
       episodesAired:
-        item &&
-        item.episodesAired
+        item && item.episodesAired
           ? item.episodesAired
           : 0,
 
       year:
-        item &&
-        item.year
+        item && item.year
           ? item.year
           : null,
 
       season:
-        item &&
-        item.season
+        item && item.season
           ? item.season
           : ''
     };
@@ -583,16 +628,10 @@
       i++
     ) {
       if (
-        String(
-          old[i].id
-        ) !==
-        String(
-          item.id
-        )
+        String(old[i].id) !==
+        String(item.id)
       ) {
-        next.push(
-          old[i]
-        );
+        next.push(old[i]);
       }
     }
 
@@ -618,9 +657,7 @@
       i++
     ) {
       if (
-        String(
-          list[i].id
-        ) ===
+        String(list[i].id) ===
         String(id)
       ) {
         return true;
@@ -653,20 +690,14 @@
       i++
     ) {
       if (
-        String(
-          list[i].id
-        ) ===
-        String(
-          item.id
-        )
+        String(list[i].id) ===
+        String(item.id)
       ) {
         found = true;
       } else if (
         next.length < 39
       ) {
-        next.push(
-          list[i]
-        );
+        next.push(list[i]);
       }
     }
 
@@ -686,20 +717,114 @@
     return !found;
   }
 
+  function watchStore() {
+    try {
+      var value =
+        Lampa.Storage.get(
+          WATCH_KEY,
+          {}
+        );
+
+      return (
+        value &&
+        typeof value === 'object'
+          ? value
+          : {}
+      );
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function watchState(id) {
+    var store =
+      watchStore();
+
+    return (
+      store[
+        String(id || '')
+      ] ||
+      {}
+    );
+  }
+
+  function saveWatchState(id, patch) {
+    id =
+      String(
+        id ||
+        ''
+      );
+
+    if (!id) {
+      return;
+    }
+
+    var store =
+      watchStore();
+
+    var previous =
+      store[id] ||
+      {};
+
+    var next = {};
+    var key;
+
+    for (key in previous) {
+      if (
+        Object.prototype.hasOwnProperty.call(
+          previous,
+          key
+        )
+      ) {
+        next[key] =
+          previous[key];
+      }
+    }
+
+    patch =
+      patch ||
+      {};
+
+    for (key in patch) {
+      if (
+        Object.prototype.hasOwnProperty.call(
+          patch,
+          key
+        )
+      ) {
+        next[key] =
+          patch[key];
+      }
+    }
+
+    next.updatedAt =
+      Date.now();
+
+    store[id] =
+      next;
+
+    try {
+      Lampa.Storage.set(
+        WATCH_KEY,
+        store
+      );
+    } catch (e) {}
+  }
+
   /* =======================================================
    * Styling
    * ===================================================== */
 
   function injectStyle() {
     if (
-      $('#animehub-v010-style')
+      $('#animehub-v020-style')
         .length
     ) {
       return;
     }
 
     $('head').append(
-      '<style id="animehub-v010-style">' +
+      '<style id="animehub-v020-style">' +
 
       ':root{' +
         '--ah-bg:#070914;' +
@@ -1455,12 +1580,16 @@
     }
 
     image.attr(
-      'src',
-      url
+      {
+        src: url,
+        loading: 'lazy',
+        decoding: 'async'
+      }
     );
 
     image.on(
       'error',
+
       function () {
         container
           .empty()
@@ -1475,8 +1604,901 @@
       }
     );
 
-    container.append(
-      image
+    container.append(image);
+  }
+
+  /* =======================================================
+   * AnimeVost playback / native Lampa player
+   * ===================================================== */
+
+  function playerCard(anime) {
+    return {
+      id:
+        anime.id ||
+        '',
+
+      title:
+        anime.title ||
+        anime.russian ||
+        anime.name ||
+        'AnimeHub',
+
+      name:
+        anime.title ||
+        anime.russian ||
+        anime.name ||
+        'AnimeHub',
+
+      original_title:
+        anime.name ||
+        anime.english ||
+        anime.title ||
+        '',
+
+      original_name:
+        anime.name ||
+        anime.english ||
+        '',
+
+      release_date:
+        anime.year
+          ? String(anime.year) + '-01-01'
+          : '',
+
+      first_air_date:
+        anime.year
+          ? String(anime.year) + '-01-01'
+          : '',
+
+      poster_path:
+        anime.poster ||
+        '',
+
+      source:
+        'animehub',
+
+      animehub_id:
+        String(
+          anime.id ||
+          ''
+        )
+    };
+  }
+
+  function episodeLabel(episode) {
+    var number =
+      toInt(
+        episode &&
+        episode.number,
+        0
+      );
+
+    var name =
+      clean(
+        episode &&
+        episode.name
+          ? episode.name
+          : ''
+      );
+
+    if (name) {
+      return name;
+    }
+
+    return number > 0
+      ? 'Серия ' + number
+      : 'Серия';
+  }
+
+  function playableQuality(episode) {
+    var quality = {};
+
+    if (
+      episode &&
+      episode.quality &&
+      typeof episode.quality === 'object'
+    ) {
+      var key;
+
+      for (key in episode.quality) {
+        if (
+          Object.prototype.hasOwnProperty.call(
+            episode.quality,
+            key
+          ) &&
+          episode.quality[key]
+        ) {
+          quality[key] =
+            episode.quality[key];
+        }
+      }
+    }
+
+    if (
+      !quality.HD &&
+      episode &&
+      episode.url
+    ) {
+      quality.HD =
+        episode.url;
+    }
+
+    return quality;
+  }
+
+  function buildPlaylist(anime, watchData) {
+    var source =
+      watchData.episodes ||
+      [];
+
+    var list = [];
+
+    var card =
+      playerCard(anime);
+
+    var i;
+
+    for (
+      i = 0;
+      i < source.length;
+      i++
+    ) {
+      if (!source[i].url) {
+        continue;
+      }
+
+      list.push(
+        {
+          url:
+            source[i].url,
+
+          quality:
+            playableQuality(
+              source[i]
+            ),
+
+          title:
+            (
+              anime.title ||
+              anime.russian ||
+              anime.name ||
+              'AnimeHub'
+            ) +
+            ' • ' +
+            episodeLabel(
+              source[i]
+            ),
+
+          season:
+            1,
+
+          episode:
+            toInt(
+              source[i].number,
+              i + 1
+            ),
+
+          movie:
+            card,
+
+          card:
+            card,
+
+          source:
+            'AnimeVost',
+
+          animehub_id:
+            String(
+              anime.id ||
+              ''
+            ),
+
+          animehub_episode:
+            toInt(
+              source[i].number,
+              i + 1
+            ),
+
+          animehub_provider_id:
+            watchData.match &&
+            watchData.match.id
+              ? String(
+                  watchData.match.id
+                )
+              : '',
+
+          animehub_provider:
+            'AnimeVost'
+        }
+      );
+    }
+
+    return list;
+  }
+
+  function startEpisode(
+    anime,
+    watchData,
+    index
+  ) {
+    var playlist =
+      buildPlaylist(
+        anime,
+        watchData
+      );
+
+    if (!playlist.length) {
+      notify(
+        'AnimeHub: нет доступных потоков'
+      );
+
+      return;
+    }
+
+    index =
+      Math.max(
+        0,
+
+        Math.min(
+          playlist.length - 1,
+
+          toInt(
+            index,
+            0
+          )
+        )
+      );
+
+    var first =
+      playlist[index];
+
+    saveWatchState(
+      anime.id,
+
+      {
+        episode:
+          first.animehub_episode,
+
+        providerId:
+          first.animehub_provider_id,
+
+        position:
+          0,
+
+        duration:
+          0,
+
+        completed:
+          false
+      }
+    );
+
+    try {
+      Lampa.Player.play(
+        first
+      );
+
+      Lampa.Player.playlist(
+        playlist
+      );
+    } catch (error) {
+      console.log(
+        'AnimeHub player error',
+        error
+      );
+
+      notify(
+        'Не удалось запустить плеер Lampa'
+      );
+    }
+  }
+
+  function showEpisodePicker(
+    anime,
+    watchData
+  ) {
+    var episodes =
+      watchData.episodes ||
+      [];
+
+    if (!episodes.length) {
+      notify(
+        'AnimeVost: серии не найдены'
+      );
+
+      return;
+    }
+
+    var state =
+      watchState(
+        anime.id
+      );
+
+    var items = [];
+    var i;
+
+    for (
+      i = 0;
+      i < episodes.length;
+      i++
+    ) {
+      var epNumber =
+        toInt(
+          episodes[i].number,
+          i + 1
+        );
+
+      var suffix = '';
+
+      if (
+        toInt(
+          state.episode,
+          0
+        ) ===
+        epNumber
+      ) {
+        if (state.completed) {
+          suffix =
+            ' • просмотрено';
+        } else if (
+          toNumber(
+            state.position,
+            0
+          ) > 20
+        ) {
+          suffix =
+            ' • продолжить';
+        } else {
+          suffix =
+            ' • последняя';
+        }
+      }
+
+      items.push(
+        {
+          title:
+            episodeLabel(
+              episodes[i]
+            ) +
+            suffix,
+
+          episodeIndex:
+            i,
+
+          episodeNumber:
+            epNumber
+        }
+      );
+    }
+
+    showSelect(
+      (
+        watchData.match &&
+        watchData.match.title
+          ? watchData.match.title
+          : (
+              anime.title ||
+              'AnimeHub'
+            )
+      ) +
+      ' • серии',
+
+      items,
+
+      function (selected) {
+        startEpisode(
+          anime,
+          watchData,
+          selected.episodeIndex
+        );
+      }
+    );
+  }
+
+  function watchRequestUrl(
+    anime,
+    providerId
+  ) {
+    var params = {
+      id:
+        anime.id ||
+        '',
+
+      russian:
+        anime.russian ||
+        anime.title ||
+        '',
+
+      name:
+        anime.name ||
+        '',
+
+      english:
+        anime.english ||
+        '',
+
+      title:
+        anime.title ||
+        '',
+
+      year:
+        anime.year ||
+        ''
+    };
+
+    if (providerId) {
+      params.animevost_id =
+        providerId;
+    }
+
+    return workerUrl(
+      'watch',
+      params
+    );
+  }
+
+  function loadWatchData(
+    anime,
+    providerId,
+    success
+  ) {
+    var network =
+      new Lampa.Reguest();
+
+    network.timeout(
+      25000
+    );
+
+    try {
+      if (
+        Lampa.Loading &&
+        typeof Lampa.Loading.start ===
+          'function'
+      ) {
+        Lampa.Loading.start();
+      }
+    } catch (e) {}
+
+    var cacheKey =
+      'watch:' +
+      String(
+        anime.id ||
+        ''
+      ) +
+      ':' +
+      String(
+        providerId ||
+        'auto'
+      );
+
+    requestCachedJson(
+      network,
+      cacheKey,
+      5 * 60 * 1000,
+
+      watchRequestUrl(
+        anime,
+        providerId
+      ),
+
+      function (data) {
+        try {
+          if (
+            Lampa.Loading &&
+            typeof Lampa.Loading.stop ===
+              'function'
+          ) {
+            Lampa.Loading.stop();
+          }
+        } catch (e2) {}
+
+        try {
+          network.clear();
+        } catch (e3) {}
+
+        success(
+          data ||
+          {}
+        );
+      },
+
+      function (error) {
+        try {
+          if (
+            Lampa.Loading &&
+            typeof Lampa.Loading.stop ===
+              'function'
+          ) {
+            Lampa.Loading.stop();
+          }
+        } catch (e4) {}
+
+        try {
+          network.clear();
+        } catch (e5) {}
+
+        notify(
+          'Не удалось загрузить серии' +
+          (
+            error &&
+            error.status
+              ? ' • ' +
+                error.status
+              : ''
+          )
+        );
+      }
+    );
+  }
+
+  function showProviderCandidates(
+    anime,
+    data
+  ) {
+    var source =
+      data.alternatives ||
+      [];
+
+    if (!source.length) {
+      notify(
+        'AnimeVost: подходящий тайтл не найден'
+      );
+
+      return;
+    }
+
+    var items = [];
+    var i;
+
+    for (
+      i = 0;
+      i < source.length &&
+      i < 8;
+      i++
+    ) {
+      items.push(
+        {
+          title:
+            source[i].title +
+            (
+              source[i].year
+                ? ' • ' +
+                  source[i].year
+                : ''
+            ),
+
+          providerId:
+            source[i].id
+        }
+      );
+    }
+
+    showSelect(
+      'Выберите совпадение AnimeVost',
+      items,
+
+      function (selected) {
+        loadWatchData(
+          anime,
+          selected.providerId,
+
+          function (resolved) {
+            if (
+              resolved.found &&
+              resolved.episodes &&
+              resolved.episodes.length
+            ) {
+              showEpisodePicker(
+                anime,
+                resolved
+              );
+            } else {
+              notify(
+                'Для выбранного тайтла серии не найдены'
+              );
+            }
+          }
+        );
+      }
+    );
+  }
+
+  function openWatch(anime) {
+    if (
+      !anime ||
+      !anime.id
+    ) {
+      return;
+    }
+
+    var state =
+      watchState(
+        anime.id
+      );
+
+    loadWatchData(
+      anime,
+      state.providerId ||
+      '',
+
+      function (data) {
+        if (
+          data.found &&
+          data.episodes &&
+          data.episodes.length
+        ) {
+          showEpisodePicker(
+            anime,
+            data
+          );
+
+          return;
+        }
+
+        showProviderCandidates(
+          anime,
+          data
+        );
+      }
+    );
+  }
+
+  function installPlaybackTracker() {
+    var trackerFlag =
+      NS +
+      '_playback_tracker';
+
+    if (
+      window[trackerFlag]
+    ) {
+      return;
+    }
+
+    window[trackerFlag] =
+      true;
+
+    if (
+      !Lampa.Player ||
+      !Lampa.Player.listener ||
+      !Lampa.PlayerVideo ||
+      !Lampa.PlayerVideo.listener
+    ) {
+      return;
+    }
+
+    Lampa.Player.listener.follow(
+      'start',
+
+      function (data) {
+        if (
+          !data ||
+          !data.animehub_id
+        ) {
+          return;
+        }
+
+        var active =
+          true;
+
+        var animeId =
+          String(
+            data.animehub_id
+          );
+
+        var episode =
+          toInt(
+            data.animehub_episode,
+            0
+          );
+
+        var lastWrite =
+          0;
+
+        function onCanPlay() {
+          if (!active) {
+            return;
+          }
+
+          try {
+            Lampa.PlayerVideo.listener.remove(
+              'canplay',
+              onCanPlay
+            );
+          } catch (e0) {}
+
+          var state =
+            watchState(
+              animeId
+            );
+
+          if (
+            toInt(
+              state.episode,
+              0
+            ) !==
+              episode ||
+            state.completed ||
+            toNumber(
+              state.position,
+              0
+            ) < 20
+          ) {
+            return;
+          }
+
+          try {
+            var video =
+              Lampa.PlayerVideo.video();
+
+            var resume =
+              toNumber(
+                state.position,
+                0
+              );
+
+            var duration =
+              toNumber(
+                video &&
+                video.duration,
+                0
+              );
+
+            if (
+              video &&
+              resume > 20 &&
+              (
+                !duration ||
+                resume <
+                  duration -
+                  45
+              )
+            ) {
+              video.currentTime =
+                resume;
+            }
+          } catch (e) {}
+        }
+
+        function onTimeUpdate(event) {
+          if (!active) {
+            return;
+          }
+
+          var now =
+            Date.now();
+
+          if (
+            now -
+            lastWrite <
+            10000
+          ) {
+            return;
+          }
+
+          lastWrite =
+            now;
+
+          var current =
+            toNumber(
+              event &&
+              event.current,
+              0
+            );
+
+          var duration =
+            toNumber(
+              event &&
+              event.duration,
+              0
+            );
+
+          if (
+            current <= 0
+          ) {
+            return;
+          }
+
+          saveWatchState(
+            animeId,
+
+            {
+              episode:
+                episode,
+
+              providerId:
+                data.animehub_provider_id ||
+                '',
+
+              position:
+                current,
+
+              duration:
+                duration,
+
+              completed:
+                duration > 0 &&
+                current >=
+                  duration - 30
+            }
+          );
+        }
+
+        function onEnded() {
+          if (!active) {
+            return;
+          }
+
+          saveWatchState(
+            animeId,
+
+            {
+              episode:
+                episode,
+
+              providerId:
+                data.animehub_provider_id ||
+                '',
+
+              position:
+                0,
+
+              completed:
+                true
+            }
+          );
+        }
+
+        function cleanup() {
+          if (!active) {
+            return;
+          }
+
+          active =
+            false;
+
+          try {
+            Lampa.PlayerVideo.listener.remove(
+              'canplay',
+              onCanPlay
+            );
+
+            Lampa.PlayerVideo.listener.remove(
+              'timeupdate',
+              onTimeUpdate
+            );
+
+            Lampa.PlayerVideo.listener.remove(
+              'ended',
+              onEnded
+            );
+
+            Lampa.Player.listener.remove(
+              'destroy',
+              cleanup
+            );
+          } catch (e) {}
+        }
+
+        Lampa.PlayerVideo.listener.follow(
+          'canplay',
+          onCanPlay
+        );
+
+        Lampa.PlayerVideo.listener.follow(
+          'timeupdate',
+          onTimeUpdate
+        );
+
+        Lampa.PlayerVideo.listener.follow(
+          'ended',
+          onEnded
+        );
+
+        Lampa.Player.listener.follow(
+          'destroy',
+          cleanup
+        );
+      }
     );
   }
 
@@ -1534,8 +2556,7 @@
 
     while (
       scroller &&
-      scroller !==
-      container
+      scroller !== container
     ) {
       try {
         var style =
@@ -1551,10 +2572,8 @@
             : '';
 
         if (
-          overflowX ===
-            'auto' ||
-          overflowX ===
-            'scroll'
+          overflowX === 'auto' ||
+          overflowX === 'scroll'
         ) {
           var sr =
             scroller
@@ -1599,19 +2618,14 @@
     var result = [];
 
     root
-      .find(
-        '.selector'
-      )
+      .find('.selector')
       .each(
         function () {
           if (
             this &&
-            this.offsetParent !==
-              null
+            this.offsetParent !== null
           ) {
-            result.push(
-              this
-            );
+            result.push(this);
           }
         }
       );
@@ -1638,8 +2652,7 @@
         rect.top +
         rect.height / 2;
 
-      var row =
-        null;
+      var row = null;
 
       for (
         j = 0;
@@ -1655,25 +2668,18 @@
           rect.height *
           0.12
         ) {
-          row =
-            rows[j];
-
+          row = rows[j];
           break;
         }
       }
 
       if (!row) {
         row = {
-          centerY:
-            centerY,
-
-          items:
-            []
+          centerY: centerY,
+          items: []
         };
 
-        rows.push(
-          row
-        );
+        rows.push(row);
       }
 
       row.items.push(
@@ -1784,16 +2790,14 @@
     edgeLeft,
     edgeUp
   ) {
-    var last =
-      null;
+    var last = null;
 
     function current() {
       if (
         last &&
         document.documentElement
           .contains(last) &&
-        last.offsetParent !==
-          null
+        last.offsetParent !== null
       ) {
         return last;
       }
@@ -1822,8 +2826,7 @@
         return false;
       }
 
-      last =
-        element;
+      last = element;
 
       try {
         Lampa.Controller.collectionFocus(
@@ -1872,12 +2875,8 @@
           list
         );
 
-      var rowIndex =
-        -1;
-
-      var columnIndex =
-        -1;
-
+      var rowIndex = -1;
+      var columnIndex = -1;
       var r;
       var c;
 
@@ -1888,35 +2887,28 @@
       ) {
         for (
           c = 0;
-          c <
-          rows[r].items.length;
+          c < rows[r].items.length;
           c++
         ) {
           if (
             rows[r].items[c] ===
             cur
           ) {
-            rowIndex =
-              r;
-
-            columnIndex =
-              c;
-
+            rowIndex = r;
+            columnIndex = c;
             break;
           }
         }
 
         if (
-          rowIndex >=
-          0
+          rowIndex >= 0
         ) {
           break;
         }
       }
 
       if (
-        rowIndex <
-        0
+        rowIndex < 0
       ) {
         return focus(
           list[0]
@@ -1924,18 +2916,15 @@
       }
 
       if (
-        direction ===
-        'left'
+        direction === 'left'
       ) {
         if (
-          columnIndex >
-          0
+          columnIndex > 0
         ) {
           return focus(
             rows[rowIndex]
               .items[
-                columnIndex -
-                1
+                columnIndex - 1
               ]
           );
         }
@@ -1951,20 +2940,17 @@
       }
 
       if (
-        direction ===
-        'right'
+        direction === 'right'
       ) {
         if (
           columnIndex <
           rows[rowIndex]
-            .items.length -
-          1
+            .items.length - 1
         ) {
           return focus(
             rows[rowIndex]
               .items[
-                columnIndex +
-                1
+                columnIndex + 1
               ]
           );
         }
@@ -1973,18 +2959,15 @@
       }
 
       if (
-        direction ===
-        'up'
+        direction === 'up'
       ) {
         if (
-          rowIndex >
-          0
+          rowIndex > 0
         ) {
           return focus(
             nearest(
               rows[
-                rowIndex -
-                1
+                rowIndex - 1
               ].items,
               cur
             )
@@ -2002,19 +2985,16 @@
       }
 
       if (
-        direction ===
-        'down'
+        direction === 'down'
       ) {
         if (
           rowIndex <
-          rows.length -
-          1
+          rows.length - 1
         ) {
           return focus(
             nearest(
               rows[
-                rowIndex +
-                1
+                rowIndex + 1
               ].items,
               cur
             )
@@ -2029,9 +3009,7 @@
 
     function bind() {
       root
-        .find(
-          '.selector'
-        )
+        .find('.selector')
         .off(
           'hover:focus.' +
           NS
@@ -2041,8 +3019,7 @@
           NS,
 
           function () {
-            last =
-              this;
+            last = this;
 
             ensureVisible(
               viewport,
@@ -2058,14 +3035,9 @@
     }
 
     return {
-      focus:
-        focus,
-
-      move:
-        move,
-
-      bind:
-        bind,
+      focus: focus,
+      move: move,
+      bind: bind,
 
       getLast:
         function () {
@@ -2126,30 +3098,22 @@
 
         left:
           function () {
-            navigation.move(
-              'left'
-            );
+            navigation.move('left');
           },
 
         right:
           function () {
-            navigation.move(
-              'right'
-            );
+            navigation.move('right');
           },
 
         up:
           function () {
-            navigation.move(
-              'up'
-            );
+            navigation.move('up');
           },
 
         down:
           function () {
-            navigation.move(
-              'down'
-            );
+            navigation.move('down');
           },
 
         enter:
@@ -2196,17 +3160,10 @@
 
     Lampa.Activity.push(
       {
-        url:
-          '',
-
-        title:
-          'AnimeHub',
-
-        component:
-          HOME,
-
-        page:
-          1
+        url: '',
+        title: 'AnimeHub',
+        component: HOME,
+        page: 1
       }
     );
   }
@@ -2219,8 +3176,7 @@
   ) {
     Lampa.Activity.push(
       {
-        url:
-          '',
+        url: '',
 
         title:
           title ||
@@ -2261,8 +3217,7 @@
 
     Lampa.Activity.push(
       {
-        url:
-          '',
+        url: '',
 
         title:
           item.title ||
@@ -2274,8 +3229,7 @@
         ah_item:
           compactItem(item),
 
-        page:
-          1
+        page: 1
       }
     );
   }
@@ -2299,14 +3253,9 @@
           title:
             'Поиск AnimeHub',
 
-          value:
-            '',
-
-          free:
-            true,
-
-          nosave:
-            true
+          value: '',
+          free: true,
+          nosave: true
         },
 
         function (result) {
@@ -2316,8 +3265,7 @@
             );
           } catch (e) {}
 
-          var value =
-            result;
+          var value = result;
 
           if (
             result &&
@@ -2326,8 +3274,7 @@
             typeof result.value !==
               'undefined'
           ) {
-            value =
-              result.value;
+            value = result.value;
           }
 
           var query =
@@ -2374,11 +3321,8 @@
 
     Lampa.Select.show(
       {
-        title:
-          title,
-
-        items:
-          items,
+        title: title,
+        items: items,
 
         onSelect:
           function (item) {
@@ -2401,13 +3345,8 @@
   }
 
   function loadGenres(callback) {
-    if (
-      genresCache
-    ) {
-      callback(
-        genresCache
-      );
-
+    if (genresCache) {
+      callback(genresCache);
       return;
     }
 
@@ -2418,8 +3357,11 @@
       15000
     );
 
-    requestJson(
+    requestCachedJson(
       network,
+      'genres',
+      24 * 60 * 60 * 1000,
+
       workerUrl(
         'genres'
       ),
@@ -2432,9 +3374,7 @@
           network.clear();
         } catch (e) {}
 
-        callback(
-          data
-        );
+        callback(data);
       },
 
       function (error) {
@@ -2503,59 +3443,38 @@
   function showKinds() {
     var items = [
       {
-        title:
-          'TV-сериалы',
-
-        value:
-          'tv'
+        title: 'TV-сериалы',
+        value: 'tv'
       },
 
       {
-        title:
-          'Фильмы',
-
-        value:
-          'movie'
+        title: 'Фильмы',
+        value: 'movie'
       },
 
       {
-        title:
-          'OVA',
-
-        value:
-          'ova'
+        title: 'OVA',
+        value: 'ova'
       },
 
       {
-        title:
-          'ONA',
-
-        value:
-          'ona'
+        title: 'ONA',
+        value: 'ona'
       },
 
       {
-        title:
-          'Спецвыпуски',
-
-        value:
-          'special'
+        title: 'Спецвыпуски',
+        value: 'special'
       },
 
       {
-        title:
-          'TV-спецвыпуски',
-
-        value:
-          'tv_special'
+        title: 'TV-спецвыпуски',
+        value: 'tv_special'
       },
 
       {
-        title:
-          'Музыкальные клипы',
-
-        value:
-          'music'
+        title: 'Музыкальные клипы',
+        value: 'music'
       }
     ];
 
@@ -2603,41 +3522,29 @@
 
     items.push(
       {
-        title:
-          '2010-е',
-
-        value:
-          '201x'
+        title: '2010-е',
+        value: '201x'
       }
     );
 
     items.push(
       {
-        title:
-          '2000-е',
-
-        value:
-          '200x'
+        title: '2000-е',
+        value: '200x'
       }
     );
 
     items.push(
       {
-        title:
-          '1990-е',
-
-        value:
-          '199x'
+        title: '1990-е',
+        value: '199x'
       }
     );
 
     items.push(
       {
-        title:
-          '1980-е',
-
-        value:
-          '198x'
+        title: '1980-е',
+        value: '198x'
       }
     );
 
@@ -2684,18 +3591,14 @@
         $(
           '<div class="ah-navbtn selector"></div>'
         )
-        .text(
-          label
-        );
+          .text(label);
 
       button.on(
         'hover:enter',
         handler
       );
 
-      nav.append(
-        button
-      );
+      nav.append(button);
     }
 
     add(
@@ -2760,12 +3663,8 @@
     );
 
     top
-      .append(
-        brand
-      )
-      .append(
-        nav
-      );
+      .append(brand)
+      .append(nav);
 
     return top;
   }
@@ -2778,26 +3677,26 @@
     var card =
       $('<div class="ah-wide-card selector"></div>');
 
-    if (
-      item.poster
-    ) {
+    if (item.poster) {
       var image =
         $('<img alt="">')
           .attr(
-            'src',
-            item.poster
+            {
+              src: item.poster,
+              loading: 'lazy',
+              decoding: 'async'
+            }
           );
 
       image.on(
         'error',
+
         function () {
           $(this).hide();
         }
       );
 
-      card.append(
-        image
-      );
+      card.append(image);
     }
 
     card.append(
@@ -2834,25 +3733,23 @@
     var meta =
       $('<div class="ah-wide-meta"></div>');
 
-    if (
-      item.year
-    ) {
+    if (item.year) {
       meta.append(
         '<span>' +
-        escapeHtml(
-          item.year
-        ) +
+          escapeHtml(
+            item.year
+          ) +
         '</span>'
       );
     }
 
     meta.append(
       '<span>' +
-      escapeHtml(
-        kindLabel(
-          item.kind
-        )
-      ) +
+        escapeHtml(
+          kindLabel(
+            item.kind
+          )
+        ) +
       '</span>'
     );
 
@@ -2860,8 +3757,7 @@
       toNumber(
         item.score,
         0
-      ) >
-      0
+      ) > 0
     ) {
       meta.append(
         '<span style="color:#ffd76a">' +
@@ -2881,27 +3777,22 @@
       meta.append(
         '<span>' +
           escapeHtml(
-            episodeText(item)
+            episodeText(
+              item
+            )
           ) +
         '</span>'
       );
     }
 
-    copy.append(
-      meta
-    );
-
-    card.append(
-      copy
-    );
+    copy.append(meta);
+    card.append(copy);
 
     card.on(
       'hover:enter',
 
       function () {
-        openDetail(
-          item
-        );
+        openDetail(item);
       }
     );
 
@@ -2925,8 +3816,7 @@
       toNumber(
         item.score,
         0
-      ) >
-      0
+      ) > 0
     ) {
       media.append(
         '<div class="ah-poster-score">' +
@@ -2940,9 +3830,7 @@
       );
     }
 
-    card.append(
-      media
-    );
+    card.append(media);
 
     card.append(
       $('<div class="ah-poster-title"></div>')
@@ -2954,17 +3842,11 @@
 
     var meta = [];
 
-    if (
-      item.year
-    ) {
-      meta.push(
-        item.year
-      );
+    if (item.year) {
+      meta.push(item.year);
     }
 
-    if (
-      item.kind
-    ) {
+    if (item.kind) {
       meta.push(
         kindLabel(
           item.kind
@@ -2993,9 +3875,7 @@
       'hover:enter',
 
       function () {
-        openDetail(
-          item
-        );
+        openDetail(item);
       }
     );
 
@@ -3019,9 +3899,7 @@
 
     shelf.append(
       $('<div class="ah-shelf-title"></div>')
-        .text(
-          title
-        )
+        .text(title)
     );
 
     var track =
@@ -3042,13 +3920,8 @@
       );
     }
 
-    shelf.append(
-      track
-    );
-
-    root.append(
-      shelf
-    );
+    shelf.append(track);
+    root.append(shelf);
   }
 
   /* =======================================================
@@ -3059,8 +3932,7 @@
     var network =
       new Lampa.Reguest();
 
-    var alive =
-      false;
+    var alive = false;
 
     var viewport =
       $('<div class="ah-view"></div>');
@@ -3068,16 +3940,11 @@
     var root =
       $('<div class="ah-page"></div>');
 
-    var self =
-      this;
-
     var navigation;
 
     function buildHero(item) {
       if (!item) {
-        return $(
-          '<div></div>'
-        );
+        return $('<div></div>');
       }
 
       var hero =
@@ -3088,14 +3955,14 @@
         item.poster ||
         '';
 
-      if (
-        background
-      ) {
+      if (background) {
         hero.append(
           $('<img class="ah-hero-bg" alt="">')
             .attr(
-              'src',
-              background
+              {
+                src: background,
+                decoding: 'async'
+              }
             )
             .addClass(
               item.background
@@ -3133,9 +4000,7 @@
       ) {
         content.append(
           $('<div class="ah-original-title"></div>')
-            .text(
-              item.name
-            )
+            .text(item.name)
         );
       }
 
@@ -3146,8 +4011,7 @@
         toNumber(
           item.score,
           0
-        ) >
-        0
+        ) > 0
       ) {
         meta.append(
           '<span class="ah-chip score">' +
@@ -3161,9 +4025,7 @@
         );
       }
 
-      if (
-        item.year
-      ) {
+      if (item.year) {
         meta.append(
           '<span class="ah-chip">' +
             escapeHtml(
@@ -3211,9 +4073,7 @@
         );
       }
 
-      content.append(
-        meta
-      );
+      content.append(meta);
 
       content.append(
         $('<div class="ah-hero-desc"></div>')
@@ -3255,9 +4115,7 @@
         'hover:enter',
 
         function () {
-          openDetail(
-            item
-          );
+          openDetail(item);
         }
       );
 
@@ -3266,9 +4124,7 @@
 
         function () {
           var added =
-            toggleFavorite(
-              item
-            );
+            toggleFavorite(item);
 
           refreshFavorite();
 
@@ -3281,20 +4137,11 @@
       );
 
       actions
-        .append(
-          details
-        )
-        .append(
-          favorite
-        );
+        .append(details)
+        .append(favorite);
 
-      content.append(
-        actions
-      );
-
-      hero.append(
-        content
-      );
+      content.append(actions);
+      hero.append(content);
 
       return hero;
     }
@@ -3346,6 +4193,7 @@
 
       addShelf(
         root,
+
         (
           data.meta &&
           data.meta.seasonLabel
@@ -3430,12 +4278,9 @@
 
     this.create =
       function () {
-        alive =
-          true;
+        alive = true;
 
-        viewport.append(
-          root
-        );
+        viewport.append(root);
 
         root.append(
           makeTopBar(
@@ -3471,11 +4316,15 @@
           20000
         );
 
-        requestJson(
+        requestCachedJson(
           network,
+          'home',
+          3 * 60 * 1000,
+
           workerUrl(
             'home'
           ),
+
           render,
           fail
         );
@@ -3516,13 +4365,10 @@
 
     this.destroy =
       function () {
-        alive =
-          false;
+        alive = false;
 
         network.clear();
-
         viewport.remove();
-
         root.remove();
       };
   }
@@ -3535,17 +4381,13 @@
     var network =
       new Lampa.Reguest();
 
-    var alive =
-      false;
+    var alive = false;
 
     var viewport =
       $('<div class="ah-view"></div>');
 
     var root =
       $('<div class="ah-page"></div>');
-
-    var self =
-      this;
 
     var navigation;
 
@@ -3567,8 +4409,7 @@
         1
       );
 
-    var limit =
-      30;
+    var limit = 24;
 
     function render(data) {
       if (!alive) {
@@ -3589,9 +4430,7 @@
 
       head.append(
         $('<div class="ah-page-title"></div>')
-          .text(
-            title
-          )
+          .text(title)
       );
 
       head.append(
@@ -3613,9 +4452,7 @@
           )
       );
 
-      root.append(
-        head
-      );
+      root.append(head);
 
       if (
         !data.items ||
@@ -3644,9 +4481,7 @@
           );
         }
 
-        root.append(
-          grid
-        );
+        root.append(grid);
       }
 
       if (
@@ -3656,9 +4491,7 @@
         var pages =
           $('<div class="ah-pages"></div>');
 
-        if (
-          page > 1
-        ) {
+        if (page > 1) {
           var prev =
             $(
               '<div class="ah-pagebtn selector">' +
@@ -3680,9 +4513,7 @@
             }
           );
 
-          pages.append(
-            prev
-          );
+          pages.append(prev);
         }
 
         pages.append(
@@ -3692,9 +4523,7 @@
           '</div>'
         );
 
-        if (
-          data.hasNext
-        ) {
+        if (data.hasNext) {
           var next =
             $(
               '<div class="ah-pagebtn selector">' +
@@ -3717,14 +4546,10 @@
             }
           );
 
-          pages.append(
-            next
-          );
+          pages.append(next);
         }
 
-        root.append(
-          pages
-        );
+        root.append(pages);
       }
 
       navigation.bind();
@@ -3766,9 +4591,7 @@
 
       root.append(
         $('<div class="ah-page-title"></div>')
-          .text(
-            title
-          )
+          .text(title)
       );
 
       root.append(
@@ -3789,12 +4612,9 @@
 
     this.create =
       function () {
-        alive =
-          true;
+        alive = true;
 
-        viewport.append(
-          root
-        );
+        viewport.append(root);
 
         root.append(
           makeTopBar()
@@ -3828,24 +4648,26 @@
           20000
         );
 
-        requestJson(
+        requestCachedJson(
           network,
+
+          'catalog:' +
+          mode +
+          ':' +
+          value +
+          ':' +
+          page,
+
+          2 * 60 * 1000,
 
           workerUrl(
             'catalog',
 
             {
-              mode:
-                mode,
-
-              value:
-                value,
-
-              page:
-                page,
-
-              limit:
-                limit
+              mode: mode,
+              value: value,
+              page: page,
+              limit: limit
             }
           ),
 
@@ -3889,13 +4711,10 @@
 
     this.destroy =
       function () {
-        alive =
-          false;
+        alive = false;
 
         network.clear();
-
         viewport.remove();
-
         root.remove();
       };
   }
@@ -3908,17 +4727,13 @@
     var network =
       new Lampa.Reguest();
 
-    var alive =
-      false;
+    var alive = false;
 
     var viewport =
       $('<div class="ah-view"></div>');
 
     var root =
       $('<div class="ah-page"></div>');
-
-    var self =
-      this;
 
     var navigation;
 
@@ -3939,22 +4754,15 @@
           0
         );
 
-      var percent =
-        0;
+      var percent = 0;
+      var title = '';
+      var note = '';
 
-      var title =
-        '';
-
-      var note =
-        '';
-
-      if (
-        total >
-        0
-      ) {
+      if (total > 0) {
         percent =
           Math.max(
             0,
+
             Math.min(
               100,
 
@@ -4002,8 +4810,7 @@
               )
             : 'Релиз завершён';
 
-        percent =
-          100;
+        percent = 100;
       } else {
         title =
           total > 0
@@ -4074,9 +4881,7 @@
         return;
       }
 
-      saveRecent(
-        data
-      );
+      saveRecent(data);
 
       root.empty();
 
@@ -4095,14 +4900,14 @@
         data.poster ||
         '';
 
-      if (
-        bg
-      ) {
+      if (bg) {
         hero.append(
           $('<img class="ah-detail-bg" alt="">')
             .attr(
-              'src',
-              bg
+              {
+                src: bg,
+                decoding: 'async'
+              }
             )
             .addClass(
               data.background
@@ -4158,9 +4963,7 @@
       ) {
         copy.append(
           $('<div class="ah-original-title"></div>')
-            .text(
-              original
-            )
+            .text(original)
         );
       }
 
@@ -4171,8 +4974,7 @@
         toNumber(
           data.score,
           0
-        ) >
-        0
+        ) > 0
       ) {
         meta.append(
           '<span class="ah-chip score">' +
@@ -4186,9 +4988,7 @@
         );
       }
 
-      if (
-        data.year
-      ) {
+      if (data.year) {
         meta.append(
           '<span class="ah-chip">' +
             escapeHtml(
@@ -4198,9 +4998,7 @@
         );
       }
 
-      if (
-        data.kind
-      ) {
+      if (data.kind) {
         meta.append(
           '<span class="ah-chip">' +
             escapeHtml(
@@ -4212,9 +5010,7 @@
         );
       }
 
-      if (
-        data.status
-      ) {
+      if (data.status) {
         meta.append(
           '<span class="ah-chip hot">' +
             escapeHtml(
@@ -4226,9 +5022,7 @@
         );
       }
 
-      if (
-        data.rating
-      ) {
+      if (data.rating) {
         meta.append(
           '<span class="ah-chip">' +
             escapeHtml(
@@ -4240,9 +5034,7 @@
         );
       }
 
-      if (
-        data.season
-      ) {
+      if (data.season) {
         meta.append(
           '<span class="ah-chip">' +
             escapeHtml(
@@ -4254,9 +5046,7 @@
         );
       }
 
-      copy.append(
-        meta
-      );
+      copy.append(meta);
 
       if (
         data.studios &&
@@ -4325,8 +5115,33 @@
       var actions =
         $('<div class="ah-actions"></div>');
 
-      var favorite =
+      var watch =
         $('<div class="ah-action primary selector"></div>');
+
+      var favorite =
+        $('<div class="ah-action selector"></div>');
+
+      function refreshWatch() {
+        var state =
+          watchState(
+            data.id
+          );
+
+        var episode =
+          toInt(
+            state.episode,
+            0
+          );
+
+        watch.text(
+          episode > 0
+            ? (
+                '▶ Продолжить • серия ' +
+                episode
+              )
+            : '▶ Смотреть'
+        );
+      }
 
       function refreshFavorite() {
         favorite.text(
@@ -4338,16 +5153,23 @@
         );
       }
 
+      refreshWatch();
       refreshFavorite();
+
+      watch.on(
+        'hover:enter',
+
+        function () {
+          openWatch(data);
+        }
+      );
 
       favorite.on(
         'hover:enter',
 
         function () {
           var added =
-            toggleFavorite(
-              data
-            );
+            toggleFavorite(data);
 
           refreshFavorite();
 
@@ -4359,34 +5181,21 @@
         }
       );
 
-      actions.append(
-        favorite
-      );
+      actions
+        .append(watch)
+        .append(favorite);
 
-      copy.append(
-        actions
-      );
+      copy.append(actions);
 
       content
-        .append(
-          poster
-        )
-        .append(
-          copy
-        );
+        .append(poster)
+        .append(copy);
 
-      hero.append(
-        content
-      );
+      hero.append(content);
+      root.append(hero);
 
       root.append(
-        hero
-      );
-
-      root.append(
-        progressBlock(
-          data
-        )
+        progressBlock(data)
       );
 
       if (
@@ -4416,20 +5225,16 @@
           putImage(
             shot,
 
-            data.screenshots[i].originalUrl ||
-            data.screenshots[i].x332Url,
+            data.screenshots[i].x332Url ||
+            data.screenshots[i].originalUrl,
 
             'Скриншот'
           );
 
-          screens.append(
-            shot
-          );
+          screens.append(shot);
         }
 
-        root.append(
-          screens
-        );
+        root.append(screens);
       }
 
       if (
@@ -4541,12 +5346,9 @@
 
     this.create =
       function () {
-        alive =
-          true;
+        alive = true;
 
-        viewport.append(
-          root
-        );
+        viewport.append(root);
 
         root.append(
           makeTopBar()
@@ -4578,11 +5380,20 @@
           20000
         );
 
-        requestJson(
+        requestCachedJson(
           network,
+
+          'detail:' +
+          String(
+            initial.id ||
+            ''
+          ),
+
+          10 * 60 * 1000,
 
           workerUrl(
             'anime',
+
             {
               id:
                 initial.id
@@ -4634,13 +5445,10 @@
 
     this.destroy =
       function () {
-        alive =
-          false;
+        alive = false;
 
         network.clear();
-
         viewport.remove();
-
         root.remove();
       };
   }
@@ -4667,9 +5475,7 @@
         '">' +
 
         '<div class="menu__ico">' +
-          toriiSvg(
-            ''
-          ) +
+          toriiSvg('') +
         '</div>' +
 
         '<div class="menu__text">' +
@@ -4686,9 +5492,7 @@
 
     $('.menu .menu__list')
       .eq(0)
-      .append(
-        button
-      );
+      .append(button);
   }
 
   function init() {
@@ -4703,6 +5507,7 @@
 
     try {
       injectStyle();
+      installPlaybackTracker();
 
       Lampa.Component.add(
         HOME,
