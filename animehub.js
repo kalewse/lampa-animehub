@@ -2,26 +2,29 @@
 'use strict';
 
 /*
- * AnimeHub V1.3.0 Native
- * YummyAnime catalogue + working AnimeHub resolver/player.
+ * AnimeHub V1.4.0 Native Catalogue
  *
- * Performance architecture:
- * - Lampa 3.x Maker Main -> native Line -> native Card on Home
- * - Lampa 3.x Maker Category for catalogue/favourites/schedule
- * - native Lampa request cache (IndexedDB) for catalogue metadata
- * - custom HTML kept only for the branded hero/detail UI
- * - videos/recommendations remain lazy
- * - standalone native Line used for episodes and recommendations
+ * Performance first:
+ * - Native Lampa Maker Main/Line/Card/Category
+ * - 20 anime per catalogue page
+ * - page replacement instead of infinite append
+ * - Lampa request cache
+ * - video/recommendations lazy
+ * - native genre/collection catalogues
+ * - combined filters + sorting
  */
 
-var VERSION='1.3.0';
-var NS='animehub_v130';
+var VERSION='1.4.0';
+var NS='animehub_v140';
 
 var HOME=NS+'_home';
 var CATALOG=NS+'_catalog';
 var DETAIL=NS+'_detail';
 var SCHEDULE=NS+'_schedule';
 var FAVORITES=NS+'_favorites';
+var GENRES=NS+'_genres';
+var COLLECTIONS=NS+'_collections';
+var COLLECTION=NS+'_collection';
 
 var FAVORITES_KEY='animehub_v010_favorites';
 var RECENT_KEY='animehub_v010_recent';
@@ -30,30 +33,44 @@ var WATCH_KEY='animehub_v020_watch';
 var WORKER='https://animehub-lampa.kalewse69.workers.dev/';
 
 var VIDEO_CACHE_MAX=5;
+
 var videoCache={};
 var videoOrder=[];
 var videoInflight={};
+
 var genresCache=null;
 var CARD_MASK=null;
+
 
 /* ============================================================
  * BASICS
  * ============================================================ */
 
-function notify(text){
-    try{ Lampa.Noty.show(text); }
+function notify(t){
+    try{
+        Lampa.Noty.show(t);
+    }
     catch(e){}
 }
 
 function clean(v){
-    return String(v==null?'':v)
-        .replace(/\u00a0/g,' ')
-        .replace(/\s+/g,' ')
-        .trim();
+    return String(
+        v==null
+            ?''
+            :v
+    )
+    .replace(/\u00a0/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
 }
 
-function cleanDescription(v){
-    return clean(String(v==null?'':v)
+function desc(v){
+    return clean(
+        String(
+            v==null
+                ?''
+                :v
+        )
         .replace(/<br\s*\/?\s*>/gi,' ')
         .replace(/<[^>]*>/g,' ')
         .replace(/&nbsp;|&#160;/gi,' ')
@@ -61,40 +78,79 @@ function cleanDescription(v){
         .replace(/&quot;/gi,'"')
         .replace(/&#39;|&apos;/gi,"'")
         .replace(/&lt;/gi,'<')
-        .replace(/&gt;/gi,'>'));
+        .replace(/&gt;/gi,'>')
+    );
 }
 
 function esc(v){
-    return String(v==null?'':v)
-        .replace(/&/g,'&amp;')
-        .replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;')
-        .replace(/'/g,'&#39;');
+    return String(
+        v==null
+            ?''
+            :v
+    )
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
-function clip(v,n){
+function clip(
+    v,
+    l
+){
     v=clean(v);
-    if(!n||v.length<=n) return v;
 
-    return v
-        .slice(0,n)
-        .replace(/\s+\S*$/,'')+
-        '…';
+    return (
+        !l||
+        v.length<=l
+    )
+        ?v
+        :v
+            .slice(
+                0,
+                l
+            )
+            .replace(
+                /\s+\S*$/,
+                ''
+            )+
+            '…';
 }
 
-function num(v,d){
+function num(
+    v,
+    d
+){
     v=parseFloat(v);
-    return isNaN(v)?(d||0):v;
+
+    return isNaN(v)
+        ?(
+            d||
+            0
+        )
+        :v;
 }
 
-function intv(v,d){
-    v=parseInt(v,10);
-    return isNaN(v)?(d||0):v;
+function intv(
+    v,
+    d
+){
+    v=parseInt(
+        v,
+        10
+    );
+
+    return isNaN(v)
+        ?(
+            d||
+            0
+        )
+        :v;
 }
 
 function score(v){
-    v=num(v,0);
+    v=num(v);
 
     return v
         ?v
@@ -135,40 +191,34 @@ function episodeCount(a){
         a.episodes||
         {};
 
-    var aired=
+    var x=
         intv(
-            e.aired,
-            0
+            e.aired
         );
 
-    var count=
+    var y=
         intv(
-            e.count,
-            0
+            e.count
         );
 
     if(
-        count&&
-        aired&&
-        aired<count
+        y&&
+        x&&
+        x<y
     ){
         return (
-            aired+
+            x+
             ' / '+
-            count
+            y
         );
     }
 
-    if(count){
-        return String(
-            count
-        );
+    if(y){
+        return String(y);
     }
 
-    if(aired){
-        return String(
-            aired
-        );
+    if(x){
+        return String(x);
     }
 
     return '—';
@@ -176,12 +226,9 @@ function episodeCount(a){
 
 function formatDate(
     ts,
-    withTime
+    time
 ){
-    ts=num(
-        ts,
-        0
-    );
+    ts=num(ts);
 
     if(!ts){
         return '';
@@ -199,7 +246,7 @@ function formatDate(
             month:'short'
         };
 
-        if(withTime){
+        if(time){
             o.hour='2-digit';
             o.minute='2-digit';
         }
@@ -214,45 +261,62 @@ function formatDate(
     }
 }
 
+function clone(o){
+    var r={};
+
+    Object.keys(
+        o||
+        {}
+    )
+    .forEach(
+        function(k){
+            if(
+                o[k]!==undefined&&
+                o[k]!==null&&
+                o[k]!==''
+            ){
+                r[k]=o[k];
+            }
+        }
+    );
+
+    return r;
+}
+
 function workerUrl(
     path,
-    params
+    p
 ){
+    var q=[];
+
     var base=
         WORKER.replace(
             /\/?$/,
             '/'
         );
 
-    var q=[];
-
-    params=
-        params||
-        {};
-
     Object.keys(
-        params
+        p||
+        {}
     )
     .forEach(
         function(k){
             var v=
-                params[k];
+                p[k];
 
             if(
-                v===undefined||
-                v===null||
-                String(v)===''
+                v!==undefined&&
+                v!==null&&
+                String(v)!==''
             ){
-                return;
+                q.push(
+                    encodeURIComponent(k)+
+                    '='+
+                    encodeURIComponent(
+                        String(v)
+                    )
+                );
             }
-
-            q.push(
-                encodeURIComponent(k)+
-                '='+
-                encodeURIComponent(
-                    String(v)
-                )
-            );
         }
     );
 
@@ -299,7 +363,7 @@ function parseJson(v){
 function requestJson(
     net,
     url,
-    cacheMinutes,
+    minutes,
     ok,
     fail
 ){
@@ -308,37 +372,35 @@ function requestJson(
     };
 
     if(
-        cacheMinutes>
+        minutes>
         0
     ){
         options.cache={
             life:
-                cacheMinutes
+                minutes
         };
     }
 
     net.silent(
         url,
 
-        function(response){
-            var data=
-                parseJson(
-                    response
-                );
+        function(r){
+            var d=
+                parseJson(r);
 
             if(
-                !data||
-                data.ok===false
+                !d||
+                d.ok===false
             ){
                 if(fail){
                     fail({
                         message:
-                            data&&
-                            data.error||
+                            d&&
+                            d.error||
                             'Ошибка AnimeHub Worker',
 
                         data:
-                            data
+                            d
                     });
                 }
 
@@ -346,9 +408,7 @@ function requestJson(
             }
 
             if(ok){
-                ok(
-                    data
-                );
+                ok(d);
             }
         },
 
@@ -372,8 +432,7 @@ function nativeReady(){
         Lampa.Maker&&
         Lampa.Manifest&&
         intv(
-            Lampa.Manifest.app_digital,
-            0
+            Lampa.Manifest.app_digital
         )>=
         300
     );
@@ -390,15 +449,15 @@ function cardMask(){
     try{
         CARD_MASK=
             Lampa.Maker
-                .module(
-                    'Card'
-                )
-                .only(
-                    'Card',
-                    'Ratting',
-                    'Release',
-                    'Style'
-                );
+            .module(
+                'Card'
+            )
+            .only(
+                'Card',
+                'Ratting',
+                'Release',
+                'Style'
+            );
     }
     catch(e){
         CARD_MASK=
@@ -408,8 +467,9 @@ function cardMask(){
     return CARD_MASK;
 }
 
+
 /* ============================================================
- * TORII / CSS
+ * TORII / STYLE
  * ============================================================ */
 
 function toriiSvg(cls){
@@ -422,13 +482,13 @@ function toriiSvg(cls){
         '" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">'+
 
         '<defs>'+
-            '<linearGradient id="ah130g" x1="0" y1="0" x2="1" y2="1">'+
+            '<linearGradient id="ah140g" x1="0" y1="0" x2="1" y2="1">'+
                 '<stop offset="0" stop-color="#a970ff"/>'+
                 '<stop offset="1" stop-color="#ed5fd4"/>'+
             '</linearGradient>'+
         '</defs>'+
 
-        '<path fill="url(#ah130g)" d="'+
+        '<path fill="url(#ah140g)" d="'+
             'M13 20h70l-3.4 10.5c-20.9 4.1-42.3 4.1-63.2 0L13 20z '+
             'M21 37h54v8H21z '+
             'M29 48h9v29h-9z '+
@@ -440,69 +500,106 @@ function toriiSvg(cls){
     );
 }
 
+function imageElement(
+    url,
+    cls
+){
+    return url
+        ?(
+            '<img class="'+
+            esc(
+                cls||
+                ''
+            )+
+            '" src="'+
+            esc(url)+
+            '" decoding="async" alt="">'
+        )
+        :'';
+}
+
+function loaderHtml(t){
+    return (
+        '<div class="ah140-loader">'+
+            '<div class="ah140-loader-ring"></div>'+
+            toriiSvg(
+                'ah140-loader-logo'
+            )+
+            '<div>'+
+                esc(
+                    t||
+                    'Загрузка…'
+                )+
+            '</div>'+
+        '</div>'
+    );
+}
+
 function injectStyle(){
     if(
-        $('#animehub-v130-style')
+        $('#animehub-v140-style')
             .length
     ){
         return;
     }
 
     $('head').append(`
-<style id="animehub-v130-style">
+<style id="animehub-v140-style">
 
-.ah130-hero-line{
+.ah140-hero-line{
     padding:0 0 1.2em;
     box-sizing:border-box
 }
 
-.ah130-top{
+.ah140-top,
+.ah140-detail-top{
     height:3.7em;
     display:flex;
     align-items:center;
-    gap:.8em;
-    padding:0 .35em;
-    box-sizing:border-box
+    gap:.7em
 }
 
-.ah130-brand{
+.ah140-brand{
     display:flex;
     align-items:center;
-    gap:.42em;
-    font-size:1.35em;
+    gap:.4em;
+    font-size:1.32em;
     font-weight:900;
-    padding-right:.9em;
-    border-right:1px solid rgba(255,255,255,.13)
+    padding-right:.8em;
+    border-right:1px solid rgba(255,255,255,.13);
+    white-space:nowrap
 }
 
-.ah130-logo{
+.ah140-logo{
     width:1.8em;
     height:1.8em
 }
 
-.ah130-name{
+.ah140-name{
     background:linear-gradient(90deg,#fff,#dc8cff);
     -webkit-background-clip:text;
     color:transparent
 }
 
-.ah130-nav{
+.ah140-nav{
     display:flex;
-    gap:.15em
+    gap:.08em;
+    overflow:hidden
 }
 
-.ah130-navbtn{
-    padding:.52em .66em;
-    border-radius:.52em;
-    white-space:nowrap
+.ah140-navbtn{
+    padding:.5em .54em;
+    border-radius:.5em;
+    white-space:nowrap;
+    font-size:.86em
 }
 
-.ah130-navbtn.focus{
+.ah140-navbtn.focus{
     background:#8754e9;
     color:#fff
 }
 
-.ah130-hero{
+.ah140-hero{
     height:24em;
     position:relative;
     overflow:hidden;
@@ -511,7 +608,7 @@ function injectStyle(){
     background:#111629
 }
 
-.ah130-bg{
+.ah140-bg{
     position:absolute;
     inset:0;
     width:100%;
@@ -520,7 +617,7 @@ function injectStyle(){
     z-index:-5
 }
 
-.ah130-shade{
+.ah140-shade{
     position:absolute;
     inset:0;
     z-index:-4;
@@ -540,7 +637,7 @@ function injectStyle(){
         )
 }
 
-.ah130-hero-copy{
+.ah140-hero-copy{
     position:absolute;
     left:3.1%;
     top:7%;
@@ -551,7 +648,7 @@ function injectStyle(){
     justify-content:center
 }
 
-.ah130-kicker{
+.ah140-kicker{
     color:#df8cff;
     font-size:.7em;
     font-weight:800;
@@ -560,26 +657,26 @@ function injectStyle(){
     margin-bottom:.45em
 }
 
-.ah130-title{
+.ah140-title{
     font-size:2.7em;
     font-weight:900;
     line-height:1.02;
     text-shadow:0 2px 6px #000
 }
 
-.ah130-original{
+.ah140-original{
     color:#b9b5c6;
     margin:.2em 0 .5em
 }
 
-.ah130-meta{
+.ah140-meta{
     display:flex;
     flex-wrap:wrap;
     gap:.35em;
     margin:.32em 0
 }
 
-.ah130-chip{
+.ah140-chip{
     font-size:.74em;
     padding:.24em .49em;
     border-radius:999px;
@@ -587,11 +684,11 @@ function injectStyle(){
     border:1px solid rgba(255,255,255,.11)
 }
 
-.ah130-score{
+.ah140-score{
     color:#ffd76a
 }
 
-.ah130-desc{
+.ah140-desc{
     font-size:.92em;
     line-height:1.46;
     color:#f5f3fa;
@@ -600,14 +697,14 @@ function injectStyle(){
     text-shadow:0 2px 4px #000
 }
 
-.ah130-actions{
+.ah140-actions{
     display:flex;
     gap:.5em;
     flex-wrap:wrap
 }
 
-.ah130-btn,
-.ah130-lazy{
+.ah140-btn,
+.ah140-lazy{
     padding:.62em .84em;
     border-radius:.53em;
     background:rgba(255,255,255,.10);
@@ -615,7 +712,7 @@ function injectStyle(){
     font-weight:750
 }
 
-.ah130-btn.primary{
+.ah140-btn.primary{
     background:linear-gradient(
         135deg,
         #965cf8,
@@ -624,26 +721,19 @@ function injectStyle(){
     )
 }
 
-.ah130-btn.focus,
-.ah130-lazy.focus{
+.ah140-btn.focus,
+.ah140-lazy.focus{
     background:#fff;
     color:#090b14
 }
 
-.ah130-detail-wrap{
+.ah140-detail-wrap{
     padding:0 1.65em 4em;
     color:#faf8ff;
     box-sizing:border-box
 }
 
-.ah130-detail-top{
-    height:3.7em;
-    display:flex;
-    align-items:center;
-    gap:.8em
-}
-
-.ah130-detail{
+.ah140-detail{
     position:relative;
     min-height:27em;
     border-radius:.85em;
@@ -653,7 +743,7 @@ function injectStyle(){
     margin-bottom:1em
 }
 
-.ah130-detail-inner{
+.ah140-detail-inner{
     display:flex;
     gap:.9em;
     padding:1.15em;
@@ -662,7 +752,7 @@ function injectStyle(){
     box-sizing:border-box
 }
 
-.ah130-poster{
+.ah140-poster{
     width:10.8em;
     min-width:10.8em;
     height:16em;
@@ -672,14 +762,14 @@ function injectStyle(){
     border:1px solid rgba(255,255,255,.13)
 }
 
-.ah130-poster img,
-.ah130-shot img{
+.ah140-poster img,
+.ah140-shot img{
     width:100%;
     height:100%;
     object-fit:cover
 }
 
-.ah130-detail-main{
+.ah140-detail-main{
     flex:1;
     min-width:0;
     padding:.68em .78em;
@@ -693,20 +783,20 @@ function injectStyle(){
         )
 }
 
-.ah130-detail-title{
+.ah140-detail-title{
     font-size:2.15em;
     font-weight:900;
     line-height:1.05;
     text-shadow:0 2px 6px #000
 }
 
-.ah130-studio{
+.ah140-studio{
     font-size:.75em;
     color:#cbc7d5;
     margin:.12em 0
 }
 
-.ah130-aside{
+.ah140-aside{
     width:14.5em;
     min-width:14.5em;
     background:rgba(9,12,25,.84);
@@ -715,12 +805,12 @@ function injectStyle(){
     padding:.68em
 }
 
-.ah130-aside-title{
+.ah140-aside-title{
     font-weight:850;
     margin-bottom:.16em
 }
 
-.ah130-info{
+.ah140-info{
     display:flex;
     justify-content:space-between;
     gap:.45em;
@@ -729,27 +819,27 @@ function injectStyle(){
     border-bottom:1px solid rgba(255,255,255,.06)
 }
 
-.ah130-info span:first-child{
+.ah140-info span:first-child{
     color:#aaa7b8
 }
 
-.ah130-info span:last-child{
+.ah140-info span:last-child{
     text-align:right;
     font-weight:700;
     max-width:62%
 }
 
-.ah130-block{
+.ah140-block{
     margin:1em 0
 }
 
-.ah130-block-title{
+.ah140-block-title{
     font-size:1.18em;
     font-weight:850;
     margin:0 0 .46em
 }
 
-.ah130-placeholder{
+.ah140-placeholder{
     padding:.75em;
     border-radius:.62em;
     background:#101426;
@@ -760,19 +850,19 @@ function injectStyle(){
     flex-wrap:wrap
 }
 
-.ah130-shots{
+.ah140-shots{
     display:flex;
     gap:.62em;
     overflow-x:auto;
     padding:.1em 0 .45em
 }
 
-.ah130-shots::-webkit-scrollbar{
+.ah140-shots::-webkit-scrollbar{
     width:0;
     height:0
 }
 
-.ah130-shot{
+.ah140-shot{
     flex:0 0 14.5em;
     height:8.1em;
     border-radius:.56em;
@@ -780,7 +870,7 @@ function injectStyle(){
     background:#14182a
 }
 
-.ah130-longdesc{
+.ah140-longdesc{
     background:#101426;
     border:1px solid rgba(255,255,255,.06);
     border-radius:.62em;
@@ -790,7 +880,7 @@ function injectStyle(){
     margin-bottom:.95em
 }
 
-.ah130-loader{
+.ah140-loader{
     min-height:20em;
     display:flex;
     position:relative;
@@ -801,38 +891,43 @@ function injectStyle(){
     color:#bbb7c8
 }
 
-.ah130-loader-logo{
+.ah140-loader-logo{
     width:4.2em;
     height:4.2em
 }
 
-.ah130-loader-ring{
+.ah140-loader-ring{
     position:absolute;
     width:5.4em;
     height:5.4em;
     border:2px solid rgba(180,110,255,.12);
     border-top-color:#cc76ff;
     border-radius:50%;
-    animation:ah130-spin 1s linear infinite
+    animation:ah140-spin 1s linear infinite
 }
 
-@keyframes ah130-spin{
+@keyframes ah140-spin{
     to{
         transform:rotate(360deg)
     }
 }
 
 @media(max-width:1250px){
-    .ah130-aside{
+    .ah140-aside{
         display:none
     }
 
-    .ah130-detail-title{
+    .ah140-detail-title{
         font-size:1.95em
     }
 
-    .ah130-hero-copy{
+    .ah140-hero-copy{
         width:62%
+    }
+
+    .ah140-navbtn{
+        font-size:.79em;
+        padding:.48em .42em
     }
 }
 
@@ -840,44 +935,6 @@ function injectStyle(){
     `);
 }
 
-function loaderHtml(text){
-    return (
-        '<div class="ah130-loader">'+
-            '<div class="ah130-loader-ring"></div>'+
-            toriiSvg(
-                'ah130-loader-logo'
-            )+
-            '<div>'+
-                esc(
-                    text||
-                    'Загрузка…'
-                )+
-            '</div>'+
-        '</div>'
-    );
-}
-
-function imageElement(
-    url,
-    cls
-){
-    if(!url){
-        return '';
-    }
-
-    return (
-        '<img class="'+
-        esc(
-            cls||
-            ''
-        )+
-        '" src="'+
-        esc(
-            url
-        )+
-        '" decoding="async" alt="">'
-    );
-}
 
 /* ============================================================
  * STORAGE
@@ -900,12 +957,12 @@ function stored(
 
 function setStored(
     key,
-    value
+    v
 ){
     try{
         Lampa.Storage.set(
             key,
-            value
+            v
         );
     }
     catch(e){}
@@ -1007,12 +1064,8 @@ function sameAnime(
         b.source==='yummy'
     ){
         return (
-            String(
-                a.id
-            )===
-            String(
-                b.id
-            )
+            String(a.id)===
+            String(b.id)
         );
     }
 
@@ -1025,12 +1078,8 @@ function sameAnime(
             b.id||
             ''
         )&&
-        clean(
-            a.title
-        )===
-        clean(
-            b.title
-        )
+        clean(a.title)===
+        clean(b.title)
     );
 }
 
@@ -1071,18 +1120,14 @@ function toggleFavorite(a){
                 out.length<
                 49
             ){
-                out.push(
-                    x
-                );
+                out.push(x);
             }
         }
     );
 
     if(!found){
         out.unshift(
-            compactAnime(
-                a
-            )
+            compactAnime(a)
         );
     }
 
@@ -1103,9 +1148,7 @@ function saveRecent(a){
     }
 
     var out=[
-        compactAnime(
-            a
-        )
+        compactAnime(a)
     ];
 
     storedList(
@@ -1121,9 +1164,7 @@ function saveRecent(a){
                     a
                 )
             ){
-                out.push(
-                    x
-                );
+                out.push(x);
             }
         }
     );
@@ -1164,9 +1205,7 @@ function watchKey(a){
 function watchState(a){
     return (
         watchStore()[
-            watchKey(
-                a
-            )
+            watchKey(a)
         ]||
         {}
     );
@@ -1186,13 +1225,11 @@ function saveWatchState(
     var store=
         watchStore();
 
-    var key=
-        watchKey(
-            a
-        );
+    var k=
+        watchKey(a);
 
-    var state=
-        store[key]||
+    var v=
+        store[k]||
         {};
 
     Object.keys(
@@ -1200,25 +1237,17 @@ function saveWatchState(
         {}
     )
     .forEach(
-        function(k){
-            state[k]=
-                patch[k];
+        function(x){
+            v[x]=
+                patch[x];
         }
     );
 
-    state.source=
-        'yummy';
+    v.source='yummy';
+    v.anime=compactAnime(a);
+    v.updatedAt=Date.now();
 
-    state.anime=
-        compactAnime(
-            a
-        );
-
-    state.updatedAt=
-        Date.now();
-
-    store[key]=
-        state;
+    store[k]=v;
 
     setStored(
         WATCH_KEY,
@@ -1227,56 +1256,65 @@ function saveWatchState(
 }
 
 function continueStates(){
-    var store=
+    var s=
         watchStore();
 
-    return Object.keys(
-        store
-    )
-    .map(
-        function(k){
-            return store[k];
-        }
-    )
-    .filter(
-        function(x){
-            return (
-                x&&
-                x.source===
-                'yummy'&&
-                x.anime&&
-                x.anime.id&&
-                num(
-                    x.episode,
+    return Object.keys(s)
+        .map(
+            function(k){
+                return s[k];
+            }
+        )
+        .filter(
+            function(x){
+                return (
+                    x&&
+                    x.source===
+                    'yummy'&&
+                    x.anime&&
+                    num(
+                        x.episode
+                    )>
                     0
-                )>
-                0
-            );
-        }
-    )
-    .sort(
-        function(a,b){
-            return (
-                num(
-                    b.updatedAt,
-                    0
-                )-
-                num(
-                    a.updatedAt,
-                    0
-                )
-            );
-        }
-    )
-    .slice(
-        0,
-        12
-    );
+                );
+            }
+        )
+        .sort(
+            function(a,b){
+                return (
+                    num(
+                        b.updatedAt
+                    )-
+                    num(
+                        a.updatedAt
+                    )
+                );
+            }
+        )
+        .slice(
+            0,
+            12
+        );
 }
 
+
 /* ============================================================
- * ROUTES / SELECTIONS
+ * ROUTES
  * ============================================================ */
+
+function replaceActivity(o){
+    try{
+        if(
+            Lampa.Activity.replace
+        ){
+            Lampa.Activity.replace(o);
+            return;
+        }
+    }
+    catch(e){}
+
+    Lampa.Activity.push(o);
+}
 
 function openHome(){
     Lampa.Activity.push({
@@ -1287,34 +1325,234 @@ function openHome(){
     });
 }
 
+function defaultCatalogState(){
+    return {
+        sort:'top',
+        sort_forward:true,
+        from_year:1900
+    };
+}
+
+function baselineYear(st){
+    return (
+        intv(
+            st&&
+            st.from_year
+        )===
+        1900&&
+        !st.to_year
+    );
+}
+
+function legacyState(
+    mode,
+    value
+){
+    var st=
+        defaultCatalogState();
+
+    mode=
+        mode||
+        'all';
+
+    if(mode==='ongoing'){
+        st.status='ongoing';
+        st.sort='rating';
+        st.sort_forward=false;
+        delete st.from_year;
+    }
+    else if(mode==='popular'){
+        st.sort='views';
+        st.sort_forward=false;
+        delete st.from_year;
+    }
+    else if(mode==='latest'){
+        st.sort='year';
+        st.sort_forward=false;
+        delete st.from_year;
+    }
+    else if(mode==='announcements'){
+        st.status='announcement';
+        st.sort='year';
+        st.sort_forward=false;
+        delete st.from_year;
+    }
+    else if(mode==='genre'){
+        st.genres=value;
+    }
+    else if(mode==='year'){
+        st.from_year=
+            intv(value);
+
+        st.to_year=
+            intv(value);
+
+        st.sort='rating';
+        st.sort_forward=false;
+    }
+    else if(mode==='type'){
+        st.types=value;
+        st.sort='rating';
+        st.sort_forward=false;
+    }
+    else if(mode==='search'){
+        st.q=value;
+    }
+
+    return st;
+}
+
+function stateFromObject(o){
+    if(
+        o&&
+        o.ah_state
+    ){
+        return clone(
+            o.ah_state
+        );
+    }
+
+    return legacyState(
+        o&&
+        o.ah_mode,
+        o&&
+        o.ah_value
+    );
+}
+
+function catalogTitle(state){
+    var bits=[];
+
+    if(state.q){
+        bits.push(
+            'Поиск: '+
+            state.q
+        );
+    }
+
+    if(state.genres_title){
+        bits.push(
+            state.genres_title
+        );
+    }
+
+    if(state.types){
+        bits.push(
+            String(
+                state.types
+            )
+            .toUpperCase()
+        );
+    }
+
+    if(state.status){
+        bits.push(
+            statusLabel(
+                state.status
+            )
+        );
+    }
+
+    if(
+        !baselineYear(state)&&
+        state.from_year&&
+        state.to_year&&
+        String(
+            state.from_year
+        )===
+        String(
+            state.to_year
+        )
+    ){
+        bits.push(
+            String(
+                state.from_year
+            )
+        );
+    }
+    else if(
+        !baselineYear(state)&&
+        state.from_year&&
+        !state.to_year
+    ){
+        bits.push(
+            'с '+
+            state.from_year
+        );
+    }
+
+    if(state.season){
+        bits.push(
+            ({
+                winter:'Зима',
+                spring:'Весна',
+                summer:'Лето',
+                autumn:'Осень',
+                fall:'Осень'
+            })[
+                state.season
+            ]||
+            state.season
+        );
+    }
+
+    return bits.length
+        ?bits.join(' • ')
+        :'Каталог';
+}
+
+function openCatalogState(
+    state,
+    page,
+    replace
+){
+    state=
+        clone(
+            state||
+            defaultCatalogState()
+        );
+
+    var o={
+        url:'animehub/catalog',
+        title:catalogTitle(state),
+        component:CATALOG,
+        page:1,
+
+        ah_state:
+            state,
+
+        ah_page:
+            Math.max(
+                1,
+                intv(
+                    page,
+                    1
+                )
+            )
+    };
+
+    replace
+        ?replaceActivity(o)
+        :Lampa.Activity.push(o);
+}
+
 function openCatalog(
     mode,
     value,
     title,
     page
 ){
-    Lampa.Activity.push({
-        url:'animehub/catalog',
-        title:title||'Каталог',
-        component:CATALOG,
-        page:1,
+    openCatalogState(
+        legacyState(
+            mode,
+            value
+        ),
 
-        ah_mode:
-            mode||
-            'all',
+        page||
+        1,
 
-        ah_value:
-            value||
-            '',
-
-        ah_title:
-            title||
-            'Каталог',
-
-        ah_page:
-            page||
-            1
-    });
+        false
+    );
 }
 
 function openSchedule(){
@@ -1333,6 +1571,79 @@ function openFavorites(){
         component:FAVORITES,
         page:1
     });
+}
+
+function openGenres(){
+    Lampa.Activity.push({
+        url:'animehub/genres',
+        title:'AnimeHub • Жанры',
+        component:GENRES,
+        page:1
+    });
+}
+
+function openCollections(
+    page,
+    replace
+){
+    var o={
+        url:'animehub/collections',
+        title:'AnimeHub • Коллекции',
+        component:COLLECTIONS,
+        page:1,
+
+        ah_page:
+            Math.max(
+                1,
+                intv(
+                    page,
+                    1
+                )
+            )
+    };
+
+    replace
+        ?replaceActivity(o)
+        :Lampa.Activity.push(o);
+}
+
+function openCollection(
+    c,
+    page,
+    replace
+){
+    var o={
+        url:
+            'animehub/collection/'+
+            encodeURIComponent(
+                c.id
+            ),
+
+        title:
+            c.title||
+            'Коллекция',
+
+        component:
+            COLLECTION,
+
+        page:1,
+
+        ah_collection:
+            c,
+
+        ah_page:
+            Math.max(
+                1,
+                intv(
+                    page,
+                    1
+                )
+            )
+    };
+
+    replace
+        ?replaceActivity(o)
+        :Lampa.Activity.push(o);
 }
 
 function openSearch(){
@@ -1357,7 +1668,7 @@ function openSearch(){
             nosave:true
         },
 
-        function(result){
+        function(r){
             try{
                 Lampa.Controller.toggle(
                     'content'
@@ -1367,19 +1678,22 @@ function openSearch(){
 
             var q=
                 clean(
-                    result&&
-                    typeof result==='object'
-                        ?result.value
-                        :result
+                    r&&
+                    typeof r==='object'
+                        ?r.value
+                        :r
                 );
 
             if(q){
-                openCatalog(
-                    'search',
-                    q,
-                    'Поиск: '+
-                    q,
-                    1
+                var st=
+                    defaultCatalogState();
+
+                st.q=q;
+
+                openCatalogState(
+                    st,
+                    1,
+                    false
                 );
             }
         }
@@ -1409,13 +1723,11 @@ function showSelect(
         title:title,
         items:items,
 
-        onSelect:function(item){
+        onSelect:function(x){
             settled=true;
 
             if(onSelect){
-                onSelect(
-                    item
-                );
+                onSelect(x);
             }
         },
 
@@ -1441,9 +1753,16 @@ function showSelect(
     return true;
 }
 
-function loadGenres(callback){
+function after(fn){
+    setTimeout(
+        fn,
+        0
+    );
+}
+
+function loadGenres(cb){
     if(genresCache){
-        callback(
+        cb(
             genresCache
         );
 
@@ -1460,12 +1779,12 @@ function loadGenres(callback){
         ),
         1440,
 
-        function(data){
+        function(d){
             genresCache=
-                data.genres||
+                d.genres||
                 [];
 
-            callback(
+            cb(
                 genresCache
             );
 
@@ -1483,44 +1802,113 @@ function loadGenres(callback){
     );
 }
 
-function chooseGenre(){
-    loadGenres(
-        function(genres){
-            showSelect(
-                'Жанры',
 
-                genres.map(
-                    function(g){
-                        return {
-                            title:
-                                g.title,
+/* ============================================================
+ * SORT / FILTERS
+ * ============================================================ */
 
-                            id:
-                                g.id
-                        };
-                    }
-                ),
+var SORTS=[
+    {
+        title:'🏆 Формула ТОПа',
+        sort:'top',
+        forward:true
+    },
+    {
+        title:'🆕 Новые',
+        sort:'year',
+        forward:false
+    },
+    {
+        title:'⭐ Рейтинг',
+        sort:'rating',
+        forward:false
+    },
+    {
+        title:'👥 Количество оценок',
+        sort:'rating_counters',
+        forward:false
+    },
+    {
+        title:'👁 Просмотры',
+        sort:'views',
+        forward:false
+    },
+    {
+        title:'🔤 Название A–Z',
+        sort:'title',
+        forward:true
+    },
+    {
+        title:'🎲 Случайно',
+        sort:'random',
+        forward:false
+    }
+];
 
-                function(x){
-                    openCatalog(
-                        'genre',
-                        x.id,
-                        x.title,
-                        1
-                    );
-                }
+function sortName(st){
+    var x=
+        SORTS.filter(
+            function(a){
+                return (
+                    a.sort===
+                    st.sort&&
+                    a.forward===
+                    !!st.sort_forward
+                );
+            }
+        )[0];
+
+    return x
+        ?x.title.replace(
+            /^[^ ]+\s/,
+            ''
+        )
+        :'Формула ТОПа';
+}
+
+function chooseSort(state){
+    showSelect(
+        'Сортировка',
+
+        SORTS.map(
+            function(x){
+                return {
+                    title:x.title,
+                    sort:x.sort,
+                    forward:x.forward
+                };
+            }
+        ),
+
+        function(x){
+            var st=
+                clone(state);
+
+            st.sort=
+                x.sort;
+
+            st.sort_forward=
+                x.forward;
+
+            openCatalogState(
+                st,
+                1,
+                true
             );
         }
     );
 }
 
-function chooseYear(){
-    var items=[];
-
+function exactYearMenu(
+    draft,
+    back
+){
     var y=
         new Date()
-            .getFullYear()+
+        .getFullYear()+
         1;
+
+    var items=[];
 
     for(
         ;
@@ -1528,167 +1916,1084 @@ function chooseYear(){
         y--
     ){
         items.push({
-            title:
-                String(y),
-
-            value:
-                String(y)
+            title:String(y),
+            year:y
         });
     }
 
     showSelect(
-        'Год',
+        'Точный год',
         items,
 
         function(x){
-            openCatalog(
-                'year',
-                x.value,
-                x.title,
-                1
+            draft.from_year=
+                x.year;
+
+            draft.to_year=
+                x.year;
+
+            after(back);
+        },
+
+        back
+    );
+}
+
+function yearFilterMenu(
+    draft,
+    back
+){
+    var y=
+        new Date()
+        .getFullYear();
+
+    showSelect(
+        'Период выхода',
+
+        [
+            {
+                title:'Все годы',
+                kind:'all'
+            },
+            {
+                title:String(y),
+                from:y,
+                to:y
+            },
+            {
+                title:'Последние 3 года',
+                from:y-2,
+                to:y
+            },
+            {
+                title:'Последние 5 лет',
+                from:y-4,
+                to:y
+            },
+            {
+                title:'С 2020 года',
+                from:2020
+            },
+            {
+                title:'С 2010 года',
+                from:2010
+            },
+            {
+                title:'Выбрать точный год…',
+                kind:'exact'
+            }
+        ],
+
+        function(x){
+            if(
+                x.kind===
+                'exact'
+            ){
+                after(
+                    function(){
+                        exactYearMenu(
+                            draft,
+                            back
+                        );
+                    }
+                );
+
+                return;
+            }
+
+            delete draft.from_year;
+            delete draft.to_year;
+
+            if(
+                x.kind!==
+                'all'
+            ){
+                draft.from_year=
+                    x.from;
+
+                if(x.to){
+                    draft.to_year=
+                        x.to;
+                }
+            }
+
+            after(back);
+        },
+
+        back
+    );
+}
+
+function genreFilterMenu(
+    draft,
+    back
+){
+    loadGenres(
+        function(gs){
+            var items=[
+                {
+                    title:'Все жанры',
+                    clear:true
+                }
+            ]
+            .concat(
+                gs.map(
+                    function(g){
+                        return {
+                            title:g.title,
+                            id:g.id
+                        };
+                    }
+                )
+            );
+
+            showSelect(
+                'Жанр',
+                items,
+
+                function(x){
+                    delete draft.genres;
+                    delete draft.genres_title;
+
+                    if(!x.clear){
+                        draft.genres=
+                            x.id;
+
+                        draft.genres_title=
+                            x.title;
+                    }
+
+                    after(back);
+                },
+
+                back
             );
         }
     );
 }
 
-function chooseType(){
-    var types=[
-        ['TV-сериалы','tv'],
-        ['Фильмы','movie'],
-        ['OVA','ova'],
-        ['ONA','ona'],
-        ['Спецвыпуски','special']
-    ];
-
+function typeFilterMenu(
+    draft,
+    back
+){
     showSelect(
         'Тип',
 
-        types.map(
+        [
+            ['Все',''],
+            ['TV-сериал','tv'],
+            ['Фильм','movie'],
+            ['Короткометражный','shortfilm'],
+            ['OVA','ova'],
+            ['ONA','ona'],
+            ['Спецвыпуск','special'],
+            ['Короткий сериал','shorttv']
+        ]
+        .map(
             function(x){
                 return {
-                    title:
-                        x[0],
-
-                    value:
-                        x[1]
+                    title:x[0],
+                    value:x[1]
                 };
             }
         ),
 
         function(x){
-            openCatalog(
-                'type',
-                x.value,
-                x.title,
-                1
-            );
-        }
+            if(x.value){
+                draft.types=
+                    x.value;
+            }
+            else{
+                delete draft.types;
+            }
+
+            after(back);
+        },
+
+        back
     );
 }
 
-function catalogMenu(){
+function statusFilterMenu(
+    draft,
+    back
+){
     showSelect(
-        'AnimeHub',
+        'Статус',
 
         [
-            {
-                title:'Все аниме',
-                mode:'all'
-            },
-            {
-                title:'Онгоинги',
-                mode:'ongoing'
-            },
-            {
-                title:'Популярные',
-                mode:'popular'
-            },
-            {
-                title:'Топ-100',
-                mode:'top'
-            },
-            {
-                title:'Новинки',
-                mode:'latest'
-            },
-            {
-                title:'Анонсы',
-                mode:'announcements'
-            },
-            {
-                title:'Жанры',
-                action:'genres'
-            },
-            {
-                title:'Годы',
-                action:'years'
-            },
-            {
-                title:'Тип',
-                action:'types'
-            },
-            {
-                title:'Поиск',
-                action:'search'
-            },
-            {
-                title:'Расписание',
-                action:'schedule'
-            },
-            {
-                title:'Избранное',
-                action:'favorites'
+            ['Все',''],
+            ['Онгоинг','ongoing'],
+            ['Завершено','released'],
+            ['Анонс','announcement']
+        ]
+        .map(
+            function(x){
+                return {
+                    title:x[0],
+                    value:x[1]
+                };
             }
-        ],
+        ),
 
         function(x){
-            if(x.mode){
-                openCatalog(
-                    x.mode,
-                    '',
-                    x.title,
-                    1
+            if(x.value){
+                draft.status=
+                    x.value;
+            }
+            else{
+                delete draft.status;
+            }
+
+            after(back);
+        },
+
+        back
+    );
+}
+
+function seasonFilterMenu(
+    draft,
+    back
+){
+    showSelect(
+        'Сезон',
+
+        [
+            ['Все',''],
+            ['❄ Зима','winter'],
+            ['🌸 Весна','spring'],
+            ['☀ Лето','summer'],
+            ['🍂 Осень','autumn']
+        ]
+        .map(
+            function(x){
+                return {
+                    title:x[0],
+                    value:x[1]
+                };
+            }
+        ),
+
+        function(x){
+            if(x.value){
+                draft.season=
+                    x.value;
+            }
+            else{
+                delete draft.season;
+            }
+
+            after(back);
+        },
+
+        back
+    );
+}
+
+function filterMenu(state){
+    var draft=
+        clone(state);
+
+    function menu(){
+        var genre=
+            draft.genres_title||
+            draft.genres||
+            'Все';
+
+        var type=
+            draft.types
+                ?String(
+                    draft.types
+                )
+                .toUpperCase()
+                :'Все';
+
+        var status=
+            draft.status
+                ?statusLabel(
+                    draft.status
+                )
+                :'Все';
+
+        var year=
+            baselineYear(draft)
+                ?'Все'
+                :(
+                    draft.from_year
+                        ?(
+                            draft.to_year&&
+                            draft.to_year!==
+                            draft.from_year
+                                ?draft.from_year+
+                                '–'+
+                                draft.to_year
+                                :(
+                                    draft.to_year
+                                        ?String(
+                                            draft.from_year
+                                        )
+                                        :'с '+
+                                        draft.from_year
+                                )
+                        )
+                        :'Все'
                 );
+
+        var season=
+            ({
+                winter:'Зима',
+                spring:'Весна',
+                summer:'Лето',
+                autumn:'Осень'
+            })[
+                draft.season
+            ]||
+            'Все';
+
+        showSelect(
+            'Фильтры',
+
+            [
+                {
+                    title:
+                        '🎭 Жанр: '+
+                        genre,
+
+                    key:'genre'
+                },
+                {
+                    title:
+                        '🎬 Тип: '+
+                        type,
+
+                    key:'type'
+                },
+                {
+                    title:
+                        '📡 Статус: '+
+                        status,
+
+                    key:'status'
+                },
+                {
+                    title:
+                        '📅 Год: '+
+                        year,
+
+                    key:'year'
+                },
+                {
+                    title:
+                        '🌦 Сезон: '+
+                        season,
+
+                    key:'season'
+                },
+                {
+                    title:
+                        '✓ Применить',
+
+                    key:'apply'
+                },
+                {
+                    title:
+                        '↺ Сбросить фильтры',
+
+                    key:'reset'
+                }
+            ],
+
+            function(x){
+                if(x.key==='genre'){
+                    after(
+                        function(){
+                            genreFilterMenu(
+                                draft,
+                                menu
+                            );
+                        }
+                    );
+                }
+                else if(x.key==='type'){
+                    after(
+                        function(){
+                            typeFilterMenu(
+                                draft,
+                                menu
+                            );
+                        }
+                    );
+                }
+                else if(x.key==='status'){
+                    after(
+                        function(){
+                            statusFilterMenu(
+                                draft,
+                                menu
+                            );
+                        }
+                    );
+                }
+                else if(x.key==='year'){
+                    after(
+                        function(){
+                            yearFilterMenu(
+                                draft,
+                                menu
+                            );
+                        }
+                    );
+                }
+                else if(x.key==='season'){
+                    after(
+                        function(){
+                            seasonFilterMenu(
+                                draft,
+                                menu
+                            );
+                        }
+                    );
+                }
+                else if(x.key==='reset'){
+                    var keep={
+                        sort:
+                            draft.sort||
+                            'top',
+
+                        sort_forward:
+                            draft.sort_forward===
+                            undefined
+                                ?true
+                                :draft.sort_forward
+                    };
+
+                    if(draft.q){
+                        keep.q=
+                            draft.q;
+                    }
+
+                    draft=keep;
+
+                    after(menu);
+                }
+                else if(x.key==='apply'){
+                    openCatalogState(
+                        draft,
+                        1,
+                        true
+                    );
+                }
             }
-            else if(
-                x.action===
-                'genres'
-            ){
-                chooseGenre();
-            }
-            else if(
-                x.action===
-                'years'
-            ){
-                chooseYear();
-            }
-            else if(
-                x.action===
-                'types'
-            ){
-                chooseType();
-            }
-            else if(
-                x.action===
-                'search'
-            ){
-                openSearch();
-            }
-            else if(
-                x.action===
-                'schedule'
-            ){
-                openSchedule();
-            }
-            else if(
-                x.action===
-                'favorites'
-            ){
-                openFavorites();
+        );
+    }
+
+    menu();
+}
+
+function pageJump(
+    current,
+    callback
+){
+    if(
+        !Lampa.Input||
+        !Lampa.Input.edit
+    ){
+        return;
+    }
+
+    Lampa.Input.edit(
+        {
+            title:
+                'Перейти на страницу',
+
+            value:
+                String(current),
+
+            free:true,
+            nosave:true
+        },
+
+        function(r){
+            var v=
+                intv(
+                    r&&
+                    typeof r==='object'
+                        ?r.value
+                        :r,
+
+                    0
+                );
+
+            if(v>0){
+                callback(v);
             }
         }
     );
 }
+
+function filterSummary(st){
+    var a=[];
+
+    if(st.genres_title){
+        a.push(
+            st.genres_title
+        );
+    }
+    else if(st.genres){
+        a.push(
+            'Жанр'
+        );
+    }
+
+    if(st.types){
+        a.push(
+            String(
+                st.types
+            )
+            .toUpperCase()
+        );
+    }
+
+    if(st.status){
+        a.push(
+            statusLabel(
+                st.status
+            )
+        );
+    }
+
+    if(
+        st.from_year&&
+        !baselineYear(st)
+    ){
+        a.push(
+            st.to_year&&
+            st.to_year!==
+            st.from_year
+                ?st.from_year+
+                '–'+
+                st.to_year
+                :(
+                    st.to_year
+                        ?String(
+                            st.from_year
+                        )
+                        :'с '+
+                        st.from_year
+                )
+        );
+    }
+
+    if(st.season){
+        a.push(
+            ({
+                winter:'Зима',
+                spring:'Весна',
+                summer:'Лето',
+                autumn:'Осень'
+            })[
+                st.season
+            ]||
+            st.season
+        );
+    }
+
+    return a.length
+        ?a.join(' • ')
+        :'Нет фильтров';
+}
+
+
+/* ============================================================
+ * NATIVE ACTION / ANIME CARDS
+ * ============================================================ */
+
+function iconSvg(
+    kind,
+    title
+){
+    var paths={
+        home:
+            '<path d="M4 11 12 4l8 7v9h-6v-6h-4v6H4z"/>',
+
+        filter:
+            '<path d="M4 5h16M7 12h10M10 19h4"/>',
+
+        sort:
+            '<path d="M8 5v14m0 0-4-4m4 4 4-4M16 19V5m0 0-4 4m4-4 4 4"/>',
+
+        genre:
+            '<path d="M4 6h16M4 12h16M4 18h16"/>'+
+            '<circle cx="9" cy="6" r="2"/>'+
+            '<circle cx="15" cy="12" r="2"/>'+
+            '<circle cx="8" cy="18" r="2"/>',
+
+        collection:
+            '<path d="M4 6.5 12 3l8 3.5-8 3.5-8-3.5Z"/>'+
+            '<path d="m4 11 8 3.5 8-3.5M4 15.5 12 19l8-3.5"/>',
+
+        search:
+            '<circle cx="10" cy="10" r="6"/>'+
+            '<path d="m15 15 5 5"/>',
+
+        prev:
+            '<path d="m15 5-7 7 7 7"/>',
+
+        next:
+            '<path d="m9 5 7 7-7 7"/>',
+
+        page:
+            '<rect x="5" y="4" width="14" height="16" rx="2"/>'+
+            '<path d="M8 9h8M8 13h8M8 17h5"/>'
+    };
+
+    var p=
+        paths[kind]||
+        paths.page;
+
+    var svg=
+        '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">'+
+            '<defs>'+
+                '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'+
+                    '<stop stop-color="#8b5cf6"/>'+
+                    '<stop offset="1" stop-color="#e65ed1"/>'+
+                '</linearGradient>'+
+            '</defs>'+
+            '<rect width="300" height="450" rx="28" fill="#111527"/>'+
+            '<circle cx="150" cy="170" r="94" fill="url(#g)" opacity=".22"/>'+
+            '<g transform="translate(78 98) scale(6)" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'+
+                p+
+            '</g>'+
+            '<text x="150" y="330" text-anchor="middle" fill="#fff" font-family="sans-serif" font-size="26" font-weight="700">'+
+                esc(
+                    title
+                )
+                .slice(
+                    0,
+                    18
+                )+
+            '</text>'+
+        '</svg>';
+
+    return (
+        'data:image/svg+xml;charset=utf-8,'+
+        encodeURIComponent(svg)
+    );
+}
+
+function actionCard(
+    title,
+    overview,
+    kind,
+    fn
+){
+    var c={
+        id:
+            NS+
+            '_action_'+
+            kind+
+            '_'+
+            title,
+
+        title:title,
+
+        overview:
+            overview||
+            '',
+
+        poster:
+            iconSvg(
+                kind,
+                title
+            ),
+
+        source:'animehub',
+
+        params:{
+            style:{
+                name:'default'
+            },
+
+            on:{
+                'hover:enter':
+                    fn
+            }
+        }
+    };
+
+    var m=
+        cardMask();
+
+    if(
+        m!==
+        undefined
+    ){
+        c.params.module=
+            m;
+    }
+
+    return c;
+}
+
+function nativeCard(
+    a,
+    options
+){
+    options=
+        options||
+        {};
+
+    var st=
+        options.state||
+        null;
+
+    var title=
+        a.title||
+        'Anime';
+
+    if(
+        st&&
+        st.episode
+    ){
+        title+=
+            ' • серия '+
+            st.episode;
+    }
+
+    var c={
+        id:
+            'animehub_'+
+            String(
+                a.id||
+                ''
+            ),
+
+        title:title,
+
+        original_title:
+            a.original||
+            '',
+
+        release_date:
+            a.year
+                ?String(
+                    a.year
+                )+
+                '-01-01'
+                :'',
+
+        vote_average:
+            num(
+                a.score
+            ),
+
+        poster:
+            a.poster||
+            '',
+
+        source:
+            'animehub',
+
+        ahAnime:a,
+
+        params:{
+            style:{
+                name:
+                    options.wide
+                        ?'wide'
+                        :'default'
+            },
+
+            on:{
+                'hover:enter':
+                    function(){
+                        options.enter
+                            ?options.enter(
+                                a,
+                                st
+                            )
+                            :openDetail(a);
+                    }
+            }
+        }
+    };
+
+    if(options.wide){
+        c.cover=
+            a.background||
+            a.posterHero||
+            a.poster||
+            '';
+
+        c.overview=
+            st&&
+            st.episode
+                ?(
+                    'Продолжить • серия '+
+                    st.episode
+                )
+                :[
+                    a.year||'',
+                    typeLabel(a),
+
+                    num(
+                        a.score
+                    )>0
+                        ?'★ '+
+                        score(
+                            a.score
+                        )
+                        :''
+                ]
+                .filter(Boolean)
+                .join(' • ');
+    }
+
+    var m=
+        cardMask();
+
+    if(
+        m!==
+        undefined
+    ){
+        c.params.module=
+            m;
+    }
+
+    return c;
+}
+
+function lineData(
+    title,
+    items,
+    options
+){
+    options=
+        options||
+        {};
+
+    return {
+        title:title,
+
+        results:
+            (
+                items||
+                []
+            )
+            .map(
+                function(a){
+                    return nativeCard(
+                        a,
+
+                        {
+                            wide:
+                                !!options.wide,
+
+                            state:
+                                options.stateMap&&
+                                options.stateMap[
+                                    String(a.id)
+                                ],
+
+                            enter:
+                                options.enter
+                        }
+                    );
+                }
+            ),
+
+        total_pages:
+            options.more
+                ?2
+                :1,
+
+        params:{
+            items:{
+                mapping:'line',
+                align_left:false,
+                view:
+                    options.view||
+                    6
+            },
+
+            emit:
+                options.more
+                    ?{
+                        onMore:
+                            options.more
+                    }
+                    :{}
+        }
+    };
+}
+
+function genrePoster(
+    title,
+    index
+){
+    var colors=[
+        ['#ff6878','#825ed8'],
+        ['#50c5b7','#256ca9'],
+        ['#f0a45d','#d34d74'],
+        ['#8b79ed','#4c60b8']
+    ][
+        index%
+        4
+    ];
+
+    var display=
+        String(
+            title||
+            ''
+        )
+        .slice(
+            0,
+            20
+        );
+
+    var mark=
+        display
+        .charAt(0)
+        .toUpperCase();
+
+    var svg=
+        '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">'+
+            '<defs>'+
+                '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'+
+                    '<stop stop-color="'+
+                        colors[0]+
+                    '"/>'+
+                    '<stop offset="1" stop-color="'+
+                        colors[1]+
+                    '"/>'+
+                '</linearGradient>'+
+            '</defs>'+
+            '<rect width="300" height="450" rx="28" fill="url(#g)"/>'+
+            '<circle cx="255" cy="70" r="120" fill="#fff" opacity=".09"/>'+
+            '<text x="32" y="220" fill="#fff" fill-opacity=".28" font-family="sans-serif" font-size="120" font-weight="800">'+
+                esc(mark)+
+            '</text>'+
+            '<text x="28" y="330" fill="#fff" font-family="sans-serif" font-size="26" font-weight="700">'+
+                esc(display)+
+            '</text>'+
+        '</svg>';
+
+    return (
+        'data:image/svg+xml;charset=utf-8,'+
+        encodeURIComponent(svg)
+    );
+}
+
+function collectionCard(c){
+    var fake={
+        id:
+            'collection_'+
+            c.id,
+
+        title:
+            c.title,
+
+        poster:
+            c.poster||
+            c.previews&&
+            c.previews[0]||
+            '',
+
+        score:0,
+        year:null,
+
+        type:{
+            name:
+                c.count
+                    ?c.count+
+                    ' аниме'
+                    :'Коллекция'
+        },
+
+        source:'collection'
+    };
+
+    return nativeCard(
+        fake,
+
+        {
+            wide:true,
+
+            enter:
+                function(){
+                    openCollection(
+                        c,
+                        1,
+                        false
+                    );
+                }
+        }
+    );
+}
+
+function navActions(state){
+    return [
+        actionCard(
+            'Главная',
+            'AnimeHub',
+            'home',
+            openHome
+        ),
+
+        actionCard(
+            'Фильтры',
+            filterSummary(state),
+            'filter',
+
+            function(){
+                filterMenu(state);
+            }
+        ),
+
+        actionCard(
+            'Сортировка',
+            sortName(state),
+            'sort',
+
+            function(){
+                chooseSort(state);
+            }
+        ),
+
+        actionCard(
+            'Жанры',
+            'Все жанры',
+            'genre',
+            openGenres
+        ),
+
+        actionCard(
+            'Коллекции',
+            'Подборки',
+            'collection',
+
+            function(){
+                openCollections(
+                    1,
+                    false
+                );
+            }
+        ),
+
+        actionCard(
+            'Поиск',
+            'По названию',
+            'search',
+            openSearch
+        )
+    ];
+}
+
+
+/* ============================================================
+ * OPEN DETAIL
+ * ============================================================ */
 
 function openDetail(a){
     if(!a){
@@ -1715,9 +3020,7 @@ function openDetail(a){
             page:1,
 
             ah_item:
-                compactAnime(
-                    a
-                )
+                compactAnime(a)
         });
 
         return;
@@ -1734,50 +3037,25 @@ function openDetail(a){
                 'catalog',
 
                 {
-                    mode:'search',
-                    value:a.title,
+                    q:a.title,
                     page:1,
-                    limit:6
+                    limit:6,
+                    sort:'top',
+                    sort_forward:true
                 }
             ),
 
             2,
 
-            function(data){
-                var items=
-                    data.items||
-                    [];
-
+            function(d){
                 var best=
-                    items[0];
-
-                if(a.year){
-                    items.some(
-                        function(x){
-                            if(
-                                intv(
-                                    x.year,
-                                    0
-                                )===
-                                intv(
-                                    a.year,
-                                    0
-                                )
-                            ){
-                                best=x;
-
-                                return true;
-                            }
-
-                            return false;
-                        }
-                    );
-                }
+                    (
+                        d.items||
+                        []
+                    )[0];
 
                 if(best){
-                    openDetail(
-                        best
-                    );
+                    openDetail(best);
                 }
                 else{
                     notify(
@@ -1800,292 +3078,984 @@ function openDetail(a){
     }
 }
 
+
 /* ============================================================
- * NATIVE CARD DATA
+ * GENERIC NATIVE CATEGORY
  * ============================================================ */
 
-function nativeCard(
-    a,
+function categoryComponent(
+    object,
     options
 ){
-    options=
-        options||
+    object.page=1;
+
+    object.params=
+        object.params||
         {};
 
-    var state=
-        options.state||
-        null;
+    object.params.items={
+        mapping:'grid',
 
-    var wide=
-        !!options.wide;
+        cols:
+            options.cols||
+            5,
 
-    var title=
-        a.title||
-        'Anime';
+        limit_view:
+            options.limit_view||
+            5,
 
-    if(
-        state&&
-        state.episode
-    ){
-        title+=
-            ' • серия '+
-            state.episode;
-    }
-
-    var card={
-        id:
-            'animehub_'+
-            String(
-                a.id||
-                ''
-            ),
-
-        title:
-            title,
-
-        original_title:
-            a.original||
-            '',
-
-        release_date:
-            a.year
-                ?String(
-                    a.year
-                )+
-                '-01-01'
-                :'',
-
-        vote_average:
-            num(
-                a.score,
-                0
-            ),
-
-        poster:
-            a.poster||
-            '',
-
-        source:
-            'animehub',
-
-        ahAnime:
-            a,
-
-        params:{
-            style:{
-                name:
-                    wide
-                        ?'wide'
-                        :'default'
-            },
-
-            on:{
-                'hover:enter':
-                    function(){
-                        if(options.enter){
-                            options.enter(
-                                a,
-                                state
-                            );
-                        }
-                        else{
-                            openDetail(
-                                a
-                            );
-                        }
-                    }
-            }
-        }
+        limit_collection:
+            options.limit_collection||
+            35
     };
 
-    var mask=
-        cardMask();
+    var net=
+        new Lampa.Reguest();
 
-    if(
-        mask!==
-        undefined
-    ){
-        card.params.module=
-            mask;
-    }
-
-    if(wide){
-        card.cover=
-            a.background||
-            a.posterHero||
-            a.poster||
-            '';
-
-        card.overview=
-            state&&
-            state.episode
-                ?(
-                    'Продолжить • серия '+
-                    state.episode
-                )
-                :(
-                    [
-                        a.year||'',
-                        typeLabel(a),
-
-                        num(
-                            a.score,
-                            0
-                        )>0
-                            ?'★ '+
-                            score(
-                                a.score
-                            )
-                            :''
-                    ]
-                    .filter(Boolean)
-                    .join(
-                        ' • '
-                    )
-                );
-    }
-
-    return card;
-}
-
-function lineData(
-    title,
-    items,
-    options
-){
-    options=
-        options||
-        {};
-
-    var results=
-        (
-            items||
-            []
-        )
-        .map(
-            function(a){
-                var st=
-                    options.stateMap&&
-                    options.stateMap[
-                        String(
-                            a.id
-                        )
-                    ];
-
-                return nativeCard(
-                    a,
-
-                    {
-                        wide:
-                            !!options.wide,
-
-                        state:
-                            st,
-
-                        enter:
-                            options.enter
-                    }
-                );
-            }
+    var comp=
+        Lampa.Maker.make(
+            'Category',
+            object
         );
 
-    return {
-        title:
-            title,
+    comp.use({
+        onCreate:function(){
+            var self=
+                this;
 
-        results:
-            results,
+            options.load(
+                net,
 
-        total_pages:
-            options.more
-                ?2
-                :1,
+                function(data){
+                    var cards=
+                        options.cards(
+                            data
+                        );
 
-        params:{
-            items:{
-                mapping:'line',
-                align_left:false,
+                    self.build({
+                        results:cards,
+                        page:1,
+                        total_pages:1,
 
-                view:
-                    options.view||
-                    6
-            },
+                        total_results:
+                            options.total
+                                ?options.total(
+                                    data
+                                )
+                                :cards.length,
 
-            emit:
-                options.more
-                    ?{
-                        onMore:
-                            function(){
-                                options.more();
-                            }
-                    }
-                    :{}
-        }
-    };
-}
+                        title:
+                            options.title||
+                            object.title||
+                            ''
+                    });
+                },
 
-function filterCard(){
-    var svg=
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">'+
-            '<defs>'+
-                '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'+
-                    '<stop stop-color="#7d49e9"/>'+
-                    '<stop offset="1" stop-color="#e65ed1"/>'+
-                '</linearGradient>'+
-            '</defs>'+
-            '<rect width="300" height="450" rx="28" fill="#111527"/>'+
-            '<rect x="36" y="64" width="228" height="322" rx="26" fill="url(#g)" opacity=".24"/>'+
-            '<path d="M64 110h172M82 170h136M101 230h98M120 290h60" stroke="#fff" stroke-width="18" stroke-linecap="round"/>'+
-            '<circle cx="110" cy="110" r="20" fill="#fff"/>'+
-            '<circle cx="176" cy="170" r="20" fill="#fff"/>'+
-            '<circle cx="139" cy="230" r="20" fill="#fff"/>'+
-            '<circle cx="158" cy="290" r="20" fill="#fff"/>'+
-        '</svg>';
+                function(){
+                    self.empty(
+                        true
+                    );
 
-    var card={
-        id:
-            'animehub_filter',
+                    notify(
+                        options.error||
+                        'Не удалось загрузить'
+                    );
+                }
+            );
+        },
 
-        title:
-            'Фильтры / поиск',
-
-        poster:
-            'data:image/svg+xml;charset=utf-8,'+
-            encodeURIComponent(
-                svg
-            ),
-
-        source:
-            'animehub',
-
-        params:{
-            style:{
-                name:'default'
-            },
-
-            on:{
-                'hover:enter':
-                    catalogMenu
+        onDestroy:function(){
+            try{
+                net.clear();
             }
+            catch(e){}
         }
-    };
+    });
 
-    var mask=
-        cardMask();
-
-    if(
-        mask!==
-        undefined
-    ){
-        card.params.module=
-            mask;
-    }
-
-    return card;
+    return comp;
 }
+
 
 /* ============================================================
- * MINI EMITTER + CUSTOM HERO LINE
+ * FIXED-PAGE CATALOGUE
+ * ============================================================ */
+
+function catalogParams(
+    st,
+    page
+){
+    var p={
+        page:page,
+        limit:20,
+
+        sort:
+            st.sort||
+            'top',
+
+        sort_forward:
+            st.sort_forward===
+            undefined
+                ?true
+                :st.sort_forward
+    };
+
+    [
+        'q',
+        'genres',
+        'types',
+        'status',
+        'from_year',
+        'to_year',
+        'season'
+    ]
+    .forEach(
+        function(k){
+            if(
+                st[k]!==undefined&&
+                st[k]!==null&&
+                st[k]!==''
+            ){
+                p[k]=st[k];
+            }
+        }
+    );
+
+    return p;
+}
+
+function CatalogComponent(object){
+    var state=
+        stateFromObject(
+            object
+        );
+
+    var page=
+        Math.max(
+            1,
+            intv(
+                object.ah_page,
+                1
+            )
+        );
+
+    return categoryComponent(
+        object,
+
+        {
+            cols:5,
+
+            load:function(
+                net,
+                ok,
+                fail
+            ){
+                requestJson(
+                    net,
+
+                    workerUrl(
+                        'catalog',
+
+                        catalogParams(
+                            state,
+                            page
+                        )
+                    ),
+
+                    4,
+                    ok,
+                    fail
+                );
+            },
+
+            cards:function(data){
+                var cards=
+                    navActions(
+                        state
+                    );
+
+                (
+                    data.items||
+                    []
+                )
+                .forEach(
+                    function(a){
+                        cards.push(
+                            nativeCard(a)
+                        );
+                    }
+                );
+
+                if(page>1){
+                    cards.push(
+                        actionCard(
+                            '← Пред.',
+                            'Страница '+
+                            (
+                                page-
+                                1
+                            ),
+
+                            'prev',
+
+                            function(){
+                                openCatalogState(
+                                    state,
+                                    page-
+                                    1,
+                                    true
+                                );
+                            }
+                        )
+                    );
+                }
+
+                cards.push(
+                    actionCard(
+                        'Страница '+
+                        page,
+
+                        'Перейти к странице',
+
+                        'page',
+
+                        function(){
+                            pageJump(
+                                page,
+
+                                function(v){
+                                    openCatalogState(
+                                        state,
+                                        v,
+                                        true
+                                    );
+                                }
+                            );
+                        }
+                    )
+                );
+
+                if(data.hasNext){
+                    cards.push(
+                        actionCard(
+                            'След. →',
+
+                            'Страница '+
+                            (
+                                page+
+                                1
+                            ),
+
+                            'next',
+
+                            function(){
+                                openCatalogState(
+                                    state,
+                                    page+
+                                    1,
+                                    true
+                                );
+                            }
+                        )
+                    );
+                }
+
+                return cards;
+            },
+
+            title:
+                catalogTitle(
+                    state
+                ),
+
+            error:
+                'Не удалось загрузить каталог'
+        }
+    );
+}
+
+
+/* ============================================================
+ * GENRES
+ * ============================================================ */
+
+function GenresComponent(object){
+    return categoryComponent(
+        object,
+
+        {
+            cols:5,
+
+            load:function(
+                net,
+                ok,
+                fail
+            ){
+                requestJson(
+                    net,
+                    workerUrl(
+                        'genres'
+                    ),
+                    1440,
+                    ok,
+                    fail
+                );
+            },
+
+            cards:function(data){
+                var cards=[
+                    actionCard(
+                        'Главная',
+                        'AnimeHub',
+                        'home',
+                        openHome
+                    ),
+
+                    actionCard(
+                        'Каталог',
+                        'Все аниме',
+                        'filter',
+
+                        function(){
+                            openCatalogState(
+                                defaultCatalogState(),
+                                1,
+                                false
+                            );
+                        }
+                    ),
+
+                    actionCard(
+                        'Коллекции',
+                        'Подборки',
+                        'collection',
+
+                        function(){
+                            openCollections(
+                                1,
+                                false
+                            );
+                        }
+                    ),
+
+                    actionCard(
+                        'Поиск',
+                        'По названию',
+                        'search',
+                        openSearch
+                    )
+                ];
+
+                (
+                    data.genres||
+                    []
+                )
+                .forEach(
+                    function(
+                        g,
+                        index
+                    ){
+                        var c={
+                            id:
+                                'genre_'+
+                                g.id,
+
+                            title:
+                                g.title,
+
+                            overview:
+                                g.description||
+                                '',
+
+                            poster:
+                                genrePoster(
+                                    g.title,
+                                    index
+                                ),
+
+                            source:
+                                'animehub',
+
+                            params:{
+                                style:{
+                                    name:'default'
+                                },
+
+                                on:{
+                                    'hover:enter':
+                                        function(){
+                                            var st=
+                                                defaultCatalogState();
+
+                                            st.genres=
+                                                g.id;
+
+                                            st.genres_title=
+                                                g.title;
+
+                                            openCatalogState(
+                                                st,
+                                                1,
+                                                false
+                                            );
+                                        }
+                                }
+                            }
+                        };
+
+                        var m=
+                            cardMask();
+
+                        if(
+                            m!==
+                            undefined
+                        ){
+                            c.params.module=
+                                m;
+                        }
+
+                        cards.push(c);
+                    }
+                );
+
+                return cards;
+            },
+
+            title:'Жанры',
+
+            error:
+                'Не удалось загрузить жанры'
+        }
+    );
+}
+
+
+/* ============================================================
+ * COLLECTIONS
+ * ============================================================ */
+
+function CollectionsComponent(object){
+    var page=
+        Math.max(
+            1,
+            intv(
+                object.ah_page,
+                1
+            )
+        );
+
+    return categoryComponent(
+        object,
+
+        {
+            cols:4,
+            limit_collection:30,
+
+            load:function(
+                net,
+                ok,
+                fail
+            ){
+                requestJson(
+                    net,
+
+                    workerUrl(
+                        'collections',
+
+                        {
+                            page:page,
+                            limit:20
+                        }
+                    ),
+
+                    10,
+                    ok,
+                    fail
+                );
+            },
+
+            cards:function(data){
+                var cards=[
+                    actionCard(
+                        'Главная',
+                        'AnimeHub',
+                        'home',
+                        openHome
+                    ),
+
+                    actionCard(
+                        'Каталог',
+                        'Все аниме',
+                        'filter',
+
+                        function(){
+                            openCatalogState(
+                                defaultCatalogState(),
+                                1,
+                                false
+                            );
+                        }
+                    ),
+
+                    actionCard(
+                        'Жанры',
+                        'Все жанры',
+                        'genre',
+                        openGenres
+                    )
+                ];
+
+                (
+                    data.items||
+                    []
+                )
+                .forEach(
+                    function(c){
+                        cards.push(
+                            collectionCard(c)
+                        );
+                    }
+                );
+
+                if(page>1){
+                    cards.push(
+                        actionCard(
+                            '← Пред.',
+
+                            'Страница '+
+                            (
+                                page-
+                                1
+                            ),
+
+                            'prev',
+
+                            function(){
+                                openCollections(
+                                    page-
+                                    1,
+                                    true
+                                );
+                            }
+                        )
+                    );
+                }
+
+                cards.push(
+                    actionCard(
+                        'Страница '+
+                        page,
+
+                        'Перейти к странице',
+
+                        'page',
+
+                        function(){
+                            pageJump(
+                                page,
+
+                                function(v){
+                                    openCollections(
+                                        v,
+                                        true
+                                    );
+                                }
+                            );
+                        }
+                    )
+                );
+
+                if(data.hasNext){
+                    cards.push(
+                        actionCard(
+                            'След. →',
+
+                            'Страница '+
+                            (
+                                page+
+                                1
+                            ),
+
+                            'next',
+
+                            function(){
+                                openCollections(
+                                    page+
+                                    1,
+                                    true
+                                );
+                            }
+                        )
+                    );
+                }
+
+                return cards;
+            },
+
+            title:
+                'Коллекции',
+
+            error:
+                'Не удалось загрузить коллекции'
+        }
+    );
+}
+
+function CollectionComponent(object){
+    var c=
+        object.ah_collection||
+        {};
+
+    var page=
+        Math.max(
+            1,
+            intv(
+                object.ah_page,
+                1
+            )
+        );
+
+    return categoryComponent(
+        object,
+
+        {
+            cols:5,
+
+            load:function(
+                net,
+                ok,
+                fail
+            ){
+                requestJson(
+                    net,
+
+                    workerUrl(
+                        'collection',
+
+                        {
+                            id:c.id,
+                            page:page,
+                            limit:20
+                        }
+                    ),
+
+                    10,
+                    ok,
+                    fail
+                );
+            },
+
+            cards:function(data){
+                if(
+                    data.collection&&
+                    data.collection.id
+                ){
+                    c=
+                        data.collection;
+                }
+
+                var cards=[
+                    actionCard(
+                        'Главная',
+                        'AnimeHub',
+                        'home',
+                        openHome
+                    ),
+
+                    actionCard(
+                        'Коллекции',
+                        'Все подборки',
+                        'collection',
+
+                        function(){
+                            openCollections(
+                                1,
+                                false
+                            );
+                        }
+                    ),
+
+                    actionCard(
+                        'Каталог',
+                        'Все аниме',
+                        'filter',
+
+                        function(){
+                            openCatalogState(
+                                defaultCatalogState(),
+                                1,
+                                false
+                            );
+                        }
+                    )
+                ];
+
+                (
+                    data.items||
+                    []
+                )
+                .forEach(
+                    function(a){
+                        cards.push(
+                            nativeCard(a)
+                        );
+                    }
+                );
+
+                if(page>1){
+                    cards.push(
+                        actionCard(
+                            '← Пред.',
+
+                            'Страница '+
+                            (
+                                page-
+                                1
+                            ),
+
+                            'prev',
+
+                            function(){
+                                openCollection(
+                                    c,
+                                    page-
+                                    1,
+                                    true
+                                );
+                            }
+                        )
+                    );
+                }
+
+                cards.push(
+                    actionCard(
+                        'Страница '+
+                        page,
+
+                        'Перейти к странице',
+
+                        'page',
+
+                        function(){
+                            pageJump(
+                                page,
+
+                                function(v){
+                                    openCollection(
+                                        c,
+                                        v,
+                                        true
+                                    );
+                                }
+                            );
+                        }
+                    )
+                );
+
+                if(data.hasNext){
+                    cards.push(
+                        actionCard(
+                            'След. →',
+
+                            'Страница '+
+                            (
+                                page+
+                                1
+                            ),
+
+                            'next',
+
+                            function(){
+                                openCollection(
+                                    c,
+                                    page+
+                                    1,
+                                    true
+                                );
+                            }
+                        )
+                    );
+                }
+
+                return cards;
+            },
+
+            title:
+                c.title||
+                'Коллекция',
+
+            error:
+                'Не удалось загрузить коллекцию'
+        }
+    );
+}
+
+
+/* ============================================================
+ * FAVOURITES / SCHEDULE
+ * ============================================================ */
+
+function FavoritesComponent(object){
+    return categoryComponent(
+        object,
+
+        {
+            cols:5,
+
+            load:function(
+                net,
+                ok
+            ){
+                ok({
+                    items:
+                        storedList(
+                            FAVORITES_KEY
+                        )
+                });
+            },
+
+            cards:function(data){
+                var cards=[
+                    actionCard(
+                        'Главная',
+                        'AnimeHub',
+                        'home',
+                        openHome
+                    ),
+
+                    actionCard(
+                        'Каталог',
+                        'Все аниме',
+                        'filter',
+
+                        function(){
+                            openCatalogState(
+                                defaultCatalogState(),
+                                1,
+                                false
+                            );
+                        }
+                    ),
+
+                    actionCard(
+                        'Жанры',
+                        'Все жанры',
+                        'genre',
+                        openGenres
+                    ),
+
+                    actionCard(
+                        'Коллекции',
+                        'Подборки',
+                        'collection',
+
+                        function(){
+                            openCollections(
+                                1,
+                                false
+                            );
+                        }
+                    )
+                ];
+
+                (
+                    data.items||
+                    []
+                )
+                .slice(
+                    0,
+                    50
+                )
+                .forEach(
+                    function(a){
+                        cards.push(
+                            nativeCard(a)
+                        );
+                    }
+                );
+
+                return cards;
+            },
+
+            title:
+                'Избранное'
+        }
+    );
+}
+
+function ScheduleComponent(object){
+    return categoryComponent(
+        object,
+
+        {
+            cols:5,
+
+            load:function(
+                net,
+                ok,
+                fail
+            ){
+                requestJson(
+                    net,
+                    workerUrl(
+                        'schedule'
+                    ),
+                    10,
+                    ok,
+                    fail
+                );
+            },
+
+            cards:function(data){
+                var cards=[
+                    actionCard(
+                        'Главная',
+                        'AnimeHub',
+                        'home',
+                        openHome
+                    ),
+
+                    actionCard(
+                        'Каталог',
+                        'Все аниме',
+                        'filter',
+
+                        function(){
+                            openCatalogState(
+                                defaultCatalogState(),
+                                1,
+                                false
+                            );
+                        }
+                    )
+                ];
+
+                (
+                    data.items||
+                    []
+                )
+                .forEach(
+                    function(a){
+                        cards.push(
+                            nativeCard(a)
+                        );
+                    }
+                );
+
+                return cards;
+            },
+
+            title:
+                'Расписание',
+
+            error:
+                'Не удалось загрузить расписание'
+        }
+    );
+}
+
+
+/* ============================================================
+ * HOME HERO / NAVIGATION
  * ============================================================ */
 
 function MiniEmit(){
@@ -2093,17 +4063,13 @@ function MiniEmit(){
 }
 
 MiniEmit.prototype.use=
-function(module){
+function(m){
     if(
-        module&&
-        this.components.indexOf(
-            module
-        )<
+        m&&
+        this.components.indexOf(m)<
         0
     ){
-        this.components.push(
-            module
-        );
+        this.components.push(m);
     }
 };
 
@@ -2117,7 +4083,7 @@ function(event){
 
     var name=
         event.charAt(0)
-            .toUpperCase()+
+        .toUpperCase()+
         event.slice(1);
 
     var only=null;
@@ -2172,19 +4138,139 @@ function(event){
     );
 };
 
-function HeroLine(data){
-    MiniEmit.call(
-        this
+function topNav(active){
+    var top=
+        $('<div class="ah140-top"></div>');
+
+    var brand=
+        $('<div class="ah140-brand"></div>')
+        .append(
+            toriiSvg(
+                'ah140-logo'
+            ),
+
+            '<span class="ah140-name">'+
+                'AnimeHub'+
+            '</span>'
+        );
+
+    var nav=
+        $('<div class="ah140-nav"></div>');
+
+    function add(
+        key,
+        title,
+        fn
+    ){
+        var b=
+            $('<div class="ah140-navbtn selector"></div>')
+            .text(
+                title
+            );
+
+        if(
+            active===
+            key
+        ){
+            b.css(
+                'background',
+                'rgba(131,75,235,.22)'
+            );
+        }
+
+        b.on(
+            'hover:enter click',
+
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
+
+                fn();
+            }
+        );
+
+        nav.append(b);
+    }
+
+    add(
+        'home',
+        'Главная',
+
+        function(){
+            if(
+                active!==
+                'home'
+            ){
+                openHome();
+            }
+        }
     );
 
-    this.data=
-        data;
+    add(
+        'catalog',
+        'Каталог',
+
+        function(){
+            openCatalogState(
+                defaultCatalogState(),
+                1,
+                false
+            );
+        }
+    );
+
+    add(
+        'genres',
+        'Жанры',
+        openGenres
+    );
+
+    add(
+        'collections',
+        'Коллекции',
+
+        function(){
+            openCollections(
+                1,
+                false
+            );
+        }
+    );
+
+    add(
+        'search',
+        'Поиск',
+        openSearch
+    );
+
+    add(
+        'schedule',
+        'Расписание',
+        openSchedule
+    );
+
+    add(
+        'favorites',
+        'Избранное',
+        openFavorites
+    );
+
+    return top.append(
+        brand,
+        nav
+    );
+}
+
+function HeroLine(data){
+    MiniEmit.call(this);
+
+    this.data=data;
 
     this.html=
-        $('<div class="ah130-hero-line"></div>');
+        $('<div class="ah140-hero-line"></div>');
 
-    this.last=
-        null;
+    this.last=null;
 }
 
 HeroLine.prototype=
@@ -2197,98 +4283,20 @@ HeroLine.prototype.constructor=
 
 HeroLine.prototype.create=
 function(){
-    var self=
-        this;
+    var self=this;
 
     var a=
         this.data.hero||
         {};
 
-    var top=
-        $('<div class="ah130-top"></div>');
-
-    var brand=
-        $('<div class="ah130-brand"></div>')
-        .append(
-            toriiSvg(
-                'ah130-logo'
-            ),
-
-            '<span class="ah130-name">'+
-                'AnimeHub'+
-            '</span>'
-        );
-
-    var nav=
-        $('<div class="ah130-nav"></div>');
-
-    function navButton(
-        title,
-        action
-    ){
-        var b=
-            $('<div class="ah130-navbtn selector"></div>')
-            .text(
-                title
-            );
-
-        b.on(
-            'hover:enter click',
-
-            function(e){
-                if(e){
-                    e.preventDefault();
-                }
-
-                action();
-            }
-        );
-
-        nav.append(
-            b
-        );
-    }
-
-    navButton(
-        'Главная',
-        function(){}
-    );
-
-    navButton(
-        'Каталог',
-
-        function(){
-            openCatalog(
-                'all',
-                '',
-                'Каталог',
-                1
-            );
-        }
-    );
-
-    navButton(
-        'Поиск',
-        openSearch
-    );
-
-    navButton(
-        'Расписание',
-        openSchedule
-    );
-
-    navButton(
-        'Избранное',
-        openFavorites
-    );
-
-    top.append(
-        brand,
-        nav
+    this.html.append(
+        topNav(
+            'home'
+        )
     );
 
     var hero=
-        $('<div class="ah130-hero"></div>');
+        $('<div class="ah140-hero"></div>');
 
     var bg=
         a.background||
@@ -2300,23 +4308,23 @@ function(){
         hero.append(
             imageElement(
                 bg,
-                'ah130-bg'
+                'ah140-bg'
             )
         );
     }
 
     hero.append(
-        '<div class="ah130-shade"></div>'
+        '<div class="ah140-shade"></div>'
     );
 
     var copy=
-        $('<div class="ah130-hero-copy"></div>');
+        $('<div class="ah140-hero-copy"></div>');
 
     copy.append(
-        '<div class="ah130-kicker">'+
+        '<div class="ah140-kicker">'+
             'AnimeHub • YummyAnime'+
         '</div>'+
-        '<div class="ah130-title">'+
+        '<div class="ah140-title">'+
             esc(
                 a.title||
                 'AnimeHub'
@@ -2330,7 +4338,7 @@ function(){
         a.title
     ){
         copy.append(
-            '<div class="ah130-original">'+
+            '<div class="ah140-original">'+
                 esc(
                     a.original
                 )+
@@ -2339,16 +4347,16 @@ function(){
     }
 
     var meta=
-        $('<div class="ah130-meta"></div>');
+        $('<div class="ah140-meta"></div>');
 
     if(
         num(
-            a.score,
-            0
-        )>0
+            a.score
+        )>
+        0
     ){
         meta.append(
-            '<span class="ah130-chip ah130-score">'+
+            '<span class="ah140-chip ah140-score">'+
                 '★ '+
                 esc(
                     score(
@@ -2361,7 +4369,7 @@ function(){
 
     if(a.year){
         meta.append(
-            '<span class="ah130-chip">'+
+            '<span class="ah140-chip">'+
                 esc(
                     a.year
                 )+
@@ -2370,11 +4378,9 @@ function(){
     }
 
     meta.append(
-        '<span class="ah130-chip">'+
+        '<span class="ah140-chip">'+
             esc(
-                typeLabel(
-                    a
-                )
+                typeLabel(a)
             )+
         '</span>'
     );
@@ -2384,7 +4390,7 @@ function(){
         a.status.alias
     ){
         meta.append(
-            '<span class="ah130-chip">'+
+            '<span class="ah140-chip">'+
                 esc(
                     statusLabel(
                         a.status.alias
@@ -2395,14 +4401,12 @@ function(){
     }
 
     copy.append(
-        meta
-    );
+        meta,
 
-    copy.append(
-        '<div class="ah130-desc">'+
+        '<div class="ah140-desc">'+
             esc(
                 clip(
-                    cleanDescription(
+                    desc(
                         a.description
                     ),
                     285
@@ -2412,19 +4416,19 @@ function(){
         '</div>'
     );
 
-    var actions=
-        $('<div class="ah130-actions"></div>');
+    var acts=
+        $('<div class="ah140-actions"></div>');
 
     var watch=
-        $('<div class="ah130-btn primary selector">▶ Смотреть</div>');
+        $('<div class="ah140-btn primary selector">▶ Смотреть</div>');
 
     var details=
-        $('<div class="ah130-btn selector">ⓘ Подробнее</div>');
+        $('<div class="ah140-btn selector">ⓘ Подробнее</div>');
 
     var fav=
-        $('<div class="ah130-btn selector"></div>');
+        $('<div class="ah140-btn selector"></div>');
 
-    function refreshFav(){
+    function rf(){
         fav.text(
             isFavorite(a)
                 ?'★ В избранном'
@@ -2432,7 +4436,7 @@ function(){
         );
     }
 
-    refreshFav();
+    rf();
 
     watch.on(
         'hover:enter click',
@@ -2442,9 +4446,7 @@ function(){
                 e.preventDefault();
             }
 
-            watchAnime(
-                a
-            );
+            watchAnime(a);
         }
     );
 
@@ -2456,9 +4458,7 @@ function(){
                 e.preventDefault();
             }
 
-            openDetail(
-                a
-            );
+            openDetail(a);
         }
     );
 
@@ -2476,28 +4476,20 @@ function(){
                     :'Удалено из избранного'
             );
 
-            refreshFav();
+            rf();
         }
     );
 
-    actions.append(
+    acts.append(
         watch,
         details,
         fav
     );
 
-    copy.append(
-        actions
-    );
+    copy.append(acts);
+    hero.append(copy);
 
-    hero.append(
-        copy
-    );
-
-    this.html.append(
-        top,
-        hero
-    );
+    this.html.append(hero);
 
     this.html
         .find(
@@ -2507,27 +4499,26 @@ function(){
             'hover:focus',
 
             function(){
-                self.last=
-                    this;
+                self.last=this;
             }
         );
 };
 
 HeroLine.prototype.toggle=
 function(){
-    var self=
-        this;
+    var self=this;
 
     this.emit(
         'active'
     );
 
-    var controller={
-        link:
-            this,
+    Lampa.Controller.add(
+        'animehub_hero',
 
-        toggle:
-            function(){
+        {
+            link:this,
+
+            toggle:function(){
                 Lampa.Controller.collectionSet(
                     self.html[0]
                 );
@@ -2547,26 +4538,19 @@ function(){
                 );
             },
 
-        left:
-            function(){
-                if(
-                    Navigator.canmove(
+            left:function(){
+                Navigator.canmove(
+                    'left'
+                )
+                    ?Navigator.move(
                         'left'
                     )
-                ){
-                    Navigator.move(
+                    :self.emit(
                         'left'
                     );
-                }
-                else{
-                    self.emit(
-                        'left'
-                    );
-                }
             },
 
-        right:
-            function(){
+            right:function(){
                 if(
                     Navigator.canmove(
                         'right'
@@ -2578,53 +4562,36 @@ function(){
                 }
             },
 
-        up:
-            function(){
-                if(
-                    Navigator.canmove(
+            up:function(){
+                Navigator.canmove(
+                    'up'
+                )
+                    ?Navigator.move(
                         'up'
                     )
-                ){
-                    Navigator.move(
+                    :self.emit(
                         'up'
                     );
-                }
-                else{
-                    self.emit(
-                        'up'
-                    );
-                }
             },
 
-        down:
-            function(){
-                if(
-                    Navigator.canmove(
+            down:function(){
+                Navigator.canmove(
+                    'down'
+                )
+                    ?Navigator.move(
                         'down'
                     )
-                ){
-                    Navigator.move(
+                    :self.emit(
                         'down'
                     );
-                }
-                else{
-                    self.emit(
-                        'down'
-                    );
-                }
             },
 
-        back:
-            function(){
+            back:function(){
                 self.emit(
                     'back'
                 );
             }
-    };
-
-    Lampa.Controller.add(
-        'animehub_hero',
-        controller
+        }
     );
 
     Lampa.Controller.toggle(
@@ -2642,7 +4609,6 @@ function(js){
 HeroLine.prototype.destroy=
 function(){
     this.html.remove();
-
     this.components=[];
 };
 
@@ -2664,8 +4630,9 @@ function heroLineData(hero){
     };
 }
 
+
 /* ============================================================
- * HOME - NATIVE MAIN / LINE / CARD
+ * HOME
  * ============================================================ */
 
 function HomeComponent(object){
@@ -2680,8 +4647,7 @@ function HomeComponent(object){
 
     comp.use({
         onCreate:function(){
-            var self=
-                this;
+            var self=this;
 
             requestJson(
                 net,
@@ -2690,13 +4656,13 @@ function HomeComponent(object){
                 ),
                 2,
 
-                function(data){
+                function(d){
                     var lines=[];
 
-                    if(data.hero){
+                    if(d.hero){
                         lines.push(
                             heroLineData(
-                                data.hero
+                                d.hero
                             )
                         );
                     }
@@ -2733,9 +4699,7 @@ function HomeComponent(object){
 
                                     enter:
                                         function(a){
-                                            openDetail(
-                                                a
-                                            );
+                                            openDetail(a);
                                         }
                                 }
                             )
@@ -2743,13 +4707,13 @@ function HomeComponent(object){
                     }
 
                     if(
-                        data.ongoing&&
-                        data.ongoing.length
+                        d.ongoing&&
+                        d.ongoing.length
                     ){
                         lines.push(
                             lineData(
                                 'Сейчас выходит',
-                                data.ongoing,
+                                d.ongoing,
 
                                 {
                                     view:6,
@@ -2769,13 +4733,13 @@ function HomeComponent(object){
                     }
 
                     if(
-                        data.latest&&
-                        data.latest.length
+                        d.latest&&
+                        d.latest.length
                     ){
                         lines.push(
                             lineData(
                                 'Новинки',
-                                data.latest,
+                                d.latest,
 
                                 {
                                     view:6,
@@ -2795,13 +4759,13 @@ function HomeComponent(object){
                     }
 
                     if(
-                        data.top&&
-                        data.top.length
+                        d.top&&
+                        d.top.length
                     ){
                         lines.push(
                             lineData(
                                 'Лучшее',
-                                data.top,
+                                d.top,
 
                                 {
                                     view:6,
@@ -2848,442 +4812,88 @@ function HomeComponent(object){
     return comp;
 }
 
-/* ============================================================
- * CATALOGUE - NATIVE CATEGORY
- * ============================================================ */
-
-function catalogResults(
-    data,
-    includeFilter
-){
-    var out=[];
-
-    if(includeFilter){
-        out.push(
-            filterCard()
-        );
-    }
-
-    (
-        data.items||
-        []
-    )
-    .forEach(
-        function(a){
-            out.push(
-                nativeCard(
-                    a
-                )
-            );
-        }
-    );
-
-    return out;
-}
-
-function CatalogComponent(object){
-    object.page=
-        intv(
-            object.ah_page||
-            object.page,
-            1
-        );
-
-    object.params=
-        object.params||
-        {};
-
-    object.params.items={
-        mapping:'grid',
-        cols:5,
-        limit_view:5,
-        limit_collection:30
-    };
-
-    var net=
-        new Lampa.Reguest();
-
-    var comp=
-        Lampa.Maker.make(
-            'Category',
-            object
-        );
-
-    var mode=
-        object.ah_mode||
-        'all';
-
-    var value=
-        object.ah_value||
-        '';
-
-    function loadPage(
-        page,
-        done,
-        fail
-    ){
-        requestJson(
-            net,
-
-            workerUrl(
-                'catalog',
-
-                {
-                    mode:mode,
-                    value:value,
-                    page:page,
-                    limit:10
-                }
-            ),
-
-            3,
-
-            function(data){
-                if(
-                    !data.hasNext
-                ){
-                    comp.total_pages=
-                        page;
-                }
-
-                done({
-                    results:
-                        catalogResults(
-                            data,
-                            page===
-                            1
-                        ),
-
-                    page:
-                        page,
-
-                    total_pages:
-                        data.hasNext
-                            ?9999
-                            :page,
-
-                    total_results:
-                        data.hasNext
-                            ?999999
-                            :(
-                                (
-                                    page-
-                                    1
-                                )*
-                                10+
-                                (
-                                    data.items||
-                                    []
-                                ).length
-                            )
-                });
-            },
-
-            fail
-        );
-    }
-
-    comp.use({
-        onCreate:function(){
-            var self=
-                this;
-
-            loadPage(
-                self.object.page,
-
-                function(data){
-                    self.build(
-                        data
-                    );
-                },
-
-                function(){
-                    self.empty(
-                        true
-                    );
-
-                    notify(
-                        'Не удалось загрузить каталог'
-                    );
-                }
-            );
-        },
-
-        onNext:function(
-            done,
-            fail
-        ){
-            loadPage(
-                this.object.page,
-                done,
-                fail
-            );
-        },
-
-        onDestroy:function(){
-            try{
-                net.clear();
-            }
-            catch(e){}
-        }
-    });
-
-    return comp;
-}
-
-/* ============================================================
- * FAVORITES / SCHEDULE - NATIVE CATEGORY
- * ============================================================ */
-
-function FavoritesComponent(object){
-    object.page=
-        1;
-
-    object.params=
-        object.params||
-        {};
-
-    object.params.items={
-        mapping:'grid',
-        cols:5,
-        limit_view:5,
-        limit_collection:30
-    };
-
-    var comp=
-        Lampa.Maker.make(
-            'Category',
-            object
-        );
-
-    comp.use({
-        onCreate:function(){
-            var list=
-                storedList(
-                    FAVORITES_KEY
-                );
-
-            var results=[
-                filterCard()
-            ];
-
-            list
-                .slice(
-                    0,
-                    50
-                )
-                .forEach(
-                    function(a){
-                        results.push(
-                            nativeCard(
-                                a
-                            )
-                        );
-                    }
-                );
-
-            this.build({
-                results:
-                    results,
-
-                page:1,
-                total_pages:1,
-
-                total_results:
-                    list.length
-            });
-        }
-    });
-
-    return comp;
-}
-
-function ScheduleComponent(object){
-    object.page=
-        1;
-
-    object.params=
-        object.params||
-        {};
-
-    object.params.items={
-        mapping:'grid',
-        cols:5,
-        limit_view:5,
-        limit_collection:30
-    };
-
-    var net=
-        new Lampa.Reguest();
-
-    var comp=
-        Lampa.Maker.make(
-            'Category',
-            object
-        );
-
-    comp.use({
-        onCreate:function(){
-            var self=
-                this;
-
-            requestJson(
-                net,
-                workerUrl(
-                    'schedule'
-                ),
-                10,
-
-                function(data){
-                    var results=[
-                        filterCard()
-                    ];
-
-                    (
-                        data.items||
-                        []
-                    )
-                    .forEach(
-                        function(a){
-                            results.push(
-                                nativeCard(
-                                    a
-                                )
-                            );
-                        }
-                    );
-
-                    self.build({
-                        results:
-                            results,
-
-                        page:1,
-                        total_pages:1,
-
-                        total_results:
-                            results.length
-                    });
-                },
-
-                function(){
-                    self.empty(
-                        true
-                    );
-
-                    notify(
-                        'Не удалось загрузить расписание'
-                    );
-                }
-            );
-        },
-
-        onDestroy:function(){
-            try{
-                net.clear();
-            }
-            catch(e){}
-        }
-    });
-
-    return comp;
-}
 
 /* ============================================================
  * VIDEO HELPERS
  * ============================================================ */
 
-function videoData(video){
-    var value=
-        video&&
-        video.data;
+function videoData(v){
+    var d=
+        v&&
+        v.data;
 
-    if(!value){
+    if(!d){
         return {};
     }
 
     if(
-        typeof value===
+        typeof d===
         'object'
     ){
-        return value;
+        return d;
     }
 
     if(
-        typeof value===
+        typeof d===
         'string'
     ){
         try{
-            return JSON.parse(
-                value
-            )||
-            {};
+            return JSON.parse(d)||{};
         }
-        catch(e){
-            return {};
-        }
+        catch(e){}
     }
 
     return {};
 }
 
-function normalizeVideoUrl(url){
-    url=
-        clean(
-            url
-        );
+function normalizeVideoUrl(u){
+    u=clean(u);
 
-    if(!url){
+    if(!u){
         return '';
     }
 
     if(
-        url.indexOf('//')===
+        u.indexOf('//')===
         0
     ){
-        return (
-            'https:'+
-            url
-        );
+        return 'https:'+u;
     }
 
     if(
         /^http:\/\/(?:www\.)?kodik\./i
-            .test(
-                url
-            )
+            .test(u)
     ){
         return (
             'https://'+
-            url.slice(7)
+            u.slice(7)
         );
     }
 
-    return url;
+    return u;
 }
 
-function videoSourceUrl(video){
-    if(!video){
+function videoSourceUrl(v){
+    if(!v){
         return '';
     }
 
     var d=
-        videoData(
-            video
-        );
+        videoData(v);
 
     return normalizeVideoUrl(
-        video.yani_stream_url||
+        v.yani_stream_url||
         d.yani_stream_url||
 
-        video.iframe_url||
-        video.iframeUrl||
+        v.iframe_url||
+        v.iframeUrl||
 
-        video.url||
+        v.url||
 
-        video.player_url||
-        video.playerUrl||
+        v.player_url||
+        v.playerUrl||
 
-        video.link||
+        v.link||
 
         d.iframe_url||
         d.iframeUrl||
@@ -3297,16 +4907,14 @@ function videoSourceUrl(video){
     );
 }
 
-function videoHost(url){
+function videoHost(u){
     try{
-        return new URL(
-            url
-        )
-        .hostname
-        .replace(
-            /^www\./,
-            ''
-        );
+        return new URL(u)
+            .hostname
+            .replace(
+                /^www\./,
+                ''
+            );
     }
     catch(e){
         return '';
@@ -3314,35 +4922,33 @@ function videoHost(url){
 }
 
 function episodeValue(
-    video,
+    v,
     index
 ){
-    var raw=
-        video&&
+    var x=
+        v&&
         (
-            video.number!=null
-                ?video.number
+            v.number!=null
+                ?v.number
                 :(
-                    video.episode!=null
-                        ?video.episode
-                        :video.index
+                    v.episode!=null
+                        ?v.episode
+                        :v.index
                 )
         );
 
     if(
-        raw===undefined||
-        raw===null||
-        raw===''
+        x===undefined||
+        x===null||
+        x===''
     ){
-        raw=
+        x=
             index+
             1;
     }
 
     var m=
-        String(
-            raw
-        )
+        String(x)
         .match(
             /\d+(?:[.,]\d+)?/
         );
@@ -3355,21 +4961,17 @@ function episodeValue(
                 '.'
             )
         )
-        :String(
-            raw
-        );
+        :String(x);
 }
 
 function sourceKind(
     url,
-    video
+    v
 ){
     var d=
-        videoData(
-            video
-        );
+        videoData(v);
 
-    var value=
+    var x=
         (
             String(
                 url||
@@ -3377,8 +4979,8 @@ function sourceKind(
             )+
             ' '+
             String(
-                video&&
-                video.player||
+                v&&
+                v.player||
                 ''
             )+
             ' '+
@@ -3396,54 +4998,42 @@ function sourceKind(
 
     if(
         /\.(m3u8|mpd|mp4|webm)(?:[?#].*)?$/i
-            .test(
-                url
-            )
+            .test(url)
     ){
         return 'direct';
     }
 
     if(
         /iframecvh|cdnvideohub|(?:^|\s)cvh(?:\s|$)/i
-            .test(
-                value
-            )
+            .test(x)
     ){
         return 'cvh';
     }
 
     if(
         /iframevk|vkvideo|vk\.com|video_ext\.php|(?:^|\s)vk(?:\s|$)/i
-            .test(
-                value
-            )
+            .test(x)
     ){
         return 'vk';
     }
 
     if(
         /kodik/i
-            .test(
-                value
-            )
+            .test(x)
     ){
         return 'kodik';
     }
 
     if(
         /aksor/i
-            .test(
-                value
-            )
+            .test(x)
     ){
         return 'aksor';
     }
 
     if(
         /rutube/i
-            .test(
-                value
-            )
+            .test(x)
     ){
         return 'rutube';
     }
@@ -3451,11 +5041,9 @@ function sourceKind(
     return 'unsupported';
 }
 
-function voiceName(video){
+function voiceName(v){
     var d=
-        videoData(
-            video
-        );
+        videoData(v);
 
     return clean(
         d.dubbing||
@@ -3463,9 +5051,9 @@ function voiceName(video){
         d.voice||
         d.voice_name||
 
-        video.dubbing||
-        video.translation||
-        video.voice||
+        v.dubbing||
+        v.translation||
+        v.voice||
 
         d.player||
         'Источник'
@@ -3474,13 +5062,6 @@ function voiceName(video){
         /^\ufeff/,
         ''
     );
-}
-
-function groupPart(v){
-    return clean(
-        v
-    )
-    .toLowerCase();
 }
 
 function groupVideos(videos){
@@ -3492,41 +5073,33 @@ function groupVideos(videos){
     )
     .forEach(
         function(
-            video,
+            v,
             index
         ){
             var url=
-                videoSourceUrl(
-                    video
-                );
+                videoSourceUrl(v);
 
             if(!url){
                 return;
             }
 
-            video.iframe_url=
+            v.iframe_url=
                 url;
 
-            video._ahEpisode=
+            v._ahEpisode=
                 episodeValue(
-                    video,
+                    v,
                     index
                 );
 
             var d=
-                videoData(
-                    video
-                );
+                videoData(v);
 
             var voice=
-                voiceName(
-                    video
-                );
+                voiceName(v);
 
             var host=
-                videoHost(
-                    url
-                );
+                videoHost(url);
 
             var provider=
                 clean(
@@ -3538,17 +5111,11 @@ function groupVideos(videos){
                 );
 
             var key=
-                groupPart(
-                    voice
-                )+
+                voice.toLowerCase()+
                 '|'+
-                groupPart(
-                    provider
-                );
+                provider.toLowerCase();
 
-            if(
-                !groups[key]
-            ){
+            if(!groups[key]){
                 groups[key]={
                     key:key,
 
@@ -3566,7 +5133,7 @@ function groupVideos(videos){
                     kind:
                         sourceKind(
                             url,
-                            video
+                            v
                         ),
 
                     videos:[]
@@ -3575,9 +5142,7 @@ function groupVideos(videos){
 
             groups[key]
                 .videos
-                .push(
-                    video
-                );
+                .push(v);
         }
     );
 
@@ -3591,67 +5156,63 @@ function groupVideos(videos){
         unsupported:0
     };
 
-    return Object.keys(
-        groups
-    )
-    .map(
-        function(k){
-            var g=
-                groups[k];
+    return Object.keys(groups)
+        .map(
+            function(k){
+                var g=
+                    groups[k];
 
-            g.videos.sort(
-                function(a,b){
-                    return (
-                        num(
-                            a._ahEpisode,
-                            99999
-                        )-
-                        num(
-                            b._ahEpisode,
-                            99999
-                        )||
-                        intv(
-                            a.index,
-                            0
-                        )-
-                        intv(
-                            b.index,
-                            0
-                        )
-                    );
-                }
-            );
+                g.videos.sort(
+                    function(a,b){
+                        return (
+                            num(
+                                a._ahEpisode,
+                                99999
+                            )-
+                            num(
+                                b._ahEpisode,
+                                99999
+                            )||
+                            intv(
+                                a.index
+                            )-
+                            intv(
+                                b.index
+                            )
+                        );
+                    }
+                );
 
-            return g;
-        }
-    )
-    .sort(
-        function(a,b){
-            return (
-                (
-                    priority[
-                        b.kind
-                    ]||
-                    0
-                )-
-                (
-                    priority[
-                        a.kind
-                    ]||
-                    0
-                )||
-                clean(
-                    a.title
-                )
-                .localeCompare(
+                return g;
+            }
+        )
+        .sort(
+            function(a,b){
+                return (
+                    (
+                        priority[
+                            b.kind
+                        ]||
+                        0
+                    )-
+                    (
+                        priority[
+                            a.kind
+                        ]||
+                        0
+                    )||
                     clean(
-                        b.title
-                    ),
-                    'ru'
-                )
-            );
-        }
-    );
+                        a.title
+                    )
+                    .localeCompare(
+                        clean(
+                            b.title
+                        ),
+                        'ru'
+                    )
+                );
+            }
+        );
 }
 
 function episodeNumbers(videos){
@@ -3664,28 +5225,21 @@ function episodeNumbers(videos){
     )
     .forEach(
         function(
-            video,
+            v,
             index
         ){
             var ep=
                 episodeValue(
-                    video,
+                    v,
                     index
                 );
 
-            var key=
-                String(
-                    ep
-                );
+            var k=
+                String(ep);
 
-            if(
-                !seen[key]
-            ){
-                seen[key]=1;
-
-                out.push(
-                    ep
-                );
+            if(!seen[k]){
+                seen[k]=1;
+                out.push(ep);
             }
         }
     );
@@ -3707,28 +5261,26 @@ function episodeNumbers(videos){
 }
 
 function findVideo(
-    group,
+    g,
     ep
 ){
     var found=null;
 
     (
-        group&&
-        group.videos||
+        g&&
+        g.videos||
         []
     )
     .some(
-        function(video){
+        function(v){
             if(
                 String(
-                    video._ahEpisode
+                    v._ahEpisode
                 )===
-                String(
-                    ep
-                )||
+                String(ep)||
                 Math.abs(
                     num(
-                        video._ahEpisode,
+                        v._ahEpisode,
                         -999
                     )-
                     num(
@@ -3736,11 +5288,9 @@ function findVideo(
                         -998
                     )
                 )<
-                0.0001
+                .0001
             ){
-                found=
-                    video;
-
+                found=v;
                 return true;
             }
 
@@ -3755,35 +5305,34 @@ function groupsForEpisode(
     videos,
     ep
 ){
-    return groupVideos(
-        videos
-    )
-    .filter(
-        function(g){
-            return (
-                !!findVideo(
-                    g,
-                    ep
-                )&&
-                g.kind!==
-                'unsupported'
-            );
-        }
-    );
+    return groupVideos(videos)
+        .filter(
+            function(g){
+                return (
+                    !!findVideo(
+                        g,
+                        ep
+                    )&&
+                    g.kind!==
+                    'unsupported'
+                );
+            }
+        );
 }
+
+
+/* ============================================================
+ * VIDEO CACHE
+ * ============================================================ */
 
 function cacheVideos(
     id,
     videos
 ){
     id=
-        String(
-            id
-        );
+        String(id);
 
-    if(
-        videoCache[id]
-    ){
+    if(videoCache[id]){
         videoOrder=
             videoOrder.filter(
                 function(x){
@@ -3797,9 +5346,7 @@ function cacheVideos(
         videos:videos
     };
 
-    videoOrder.push(
-        id
-    );
+    videoOrder.push(id);
 
     while(
         videoOrder.length>
@@ -3815,7 +5362,7 @@ function loadVideos(
     a,
     ok,
     fail,
-    showLoading
+    show
 ){
     var id=
         String(
@@ -3841,21 +5388,18 @@ function loadVideos(
         hit.at<
         180000
     ){
-        setTimeout(
+        after(
             function(){
                 ok(
                     hit.videos
                 );
-            },
-            0
+            }
         );
 
         return;
     }
 
-    if(
-        videoInflight[id]
-    ){
+    if(videoInflight[id]){
         videoInflight[id]
             .push({
                 ok:ok,
@@ -3879,10 +5423,7 @@ function loadVideos(
         22000
     );
 
-    if(
-        showLoading!==
-        false
-    ){
+    if(show!==false){
         try{
             Lampa.Loading.start();
         }
@@ -3902,11 +5443,8 @@ function loadVideos(
 
         0,
 
-        function(data){
-            if(
-                showLoading!==
-                false
-            ){
+        function(d){
+            if(show!==false){
                 try{
                     Lampa.Loading.stop();
                 }
@@ -3914,7 +5452,7 @@ function loadVideos(
             }
 
             var videos=
-                data.videos||
+                d.videos||
                 [];
 
             var wait=
@@ -3935,22 +5473,17 @@ function loadVideos(
 
             wait.forEach(
                 function(x){
-                    x.ok(
-                        videos
-                    );
+                    x.ok(videos);
                 }
             );
         },
 
-        function(error){
-            if(
-                showLoading!==
-                false
-            ){
+        function(e){
+            if(show!==false){
                 try{
                     Lampa.Loading.stop();
                 }
-                catch(e){}
+                catch(x){}
             }
 
             var wait=
@@ -3962,14 +5495,12 @@ function loadVideos(
             try{
                 net.clear();
             }
-            catch(e){}
+            catch(x){}
 
             wait.forEach(
                 function(x){
                     if(x.fail){
-                        x.fail(
-                            error
-                        );
+                        x.fail(e);
                     }
                 }
             );
@@ -3977,12 +5508,13 @@ function loadVideos(
     );
 }
 
+
 /* ============================================================
  * PLAYBACK
  * ============================================================ */
 
 function restoreContent(){
-    setTimeout(
+    after(
         function(){
             try{
                 Lampa.Controller.toggle(
@@ -3990,13 +5522,12 @@ function restoreContent(){
                 );
             }
             catch(e){}
-        },
-        0
+        }
     );
 }
 
 function currentOrFirstEpisode(
-    anime,
+    a,
     videos
 ){
     var eps=
@@ -4004,49 +5535,38 @@ function currentOrFirstEpisode(
             videos
         );
 
-    if(
-        !eps.length
-    ){
+    if(!eps.length){
         return null;
     }
 
-    var state=
-        watchState(
-            anime
-        );
+    var st=
+        watchState(a);
 
     var ep=
         num(
-            state.episode,
-            0
+            st.episode
         );
 
     if(
-        eps.indexOf(
-            ep
-        )<
+        eps.indexOf(ep)<
         0
     ){
         ep=
             eps[0];
     }
-    else if(
-        state.completed
-    ){
-        var idx=
-            eps.indexOf(
-                ep
-            );
+    else if(st.completed){
+        var ix=
+            eps.indexOf(ep);
 
         if(
-            idx>=0&&
-            idx<
+            ix>=0&&
+            ix<
             eps.length-
             1
         ){
             ep=
                 eps[
-                    idx+
+                    ix+
                     1
                 ];
         }
@@ -4056,7 +5576,7 @@ function currentOrFirstEpisode(
 }
 
 function chooseSourceForEpisode(
-    anime,
+    a,
     videos,
     ep,
     alwaysAsk
@@ -4067,37 +5587,28 @@ function chooseSourceForEpisode(
             ep
         );
 
-    if(
-        !groups.length
-    ){
+    if(!groups.length){
         notify(
             'Для этой серии нет поддерживаемого источника'
         );
 
         restoreContent();
-
         return;
     }
 
-    var state=
-        watchState(
-            anime
-        );
+    var st=
+        watchState(a);
 
     var preferred=null;
 
-    if(
-        state.providerKey
-    ){
+    if(st.providerKey){
         groups.some(
             function(g){
                 if(
                     g.key===
-                    state.providerKey
+                    st.providerKey
                 ){
-                    preferred=
-                        g;
-
+                    preferred=g;
                     return true;
                 }
 
@@ -4111,7 +5622,7 @@ function chooseSourceForEpisode(
         preferred
     ){
         resolveAndPlay(
-            anime,
+            a,
             preferred,
 
             findVideo(
@@ -4128,7 +5639,7 @@ function chooseSourceForEpisode(
         1
     ){
         resolveAndPlay(
-            anime,
+            a,
             groups[0],
 
             findVideo(
@@ -4147,8 +5658,7 @@ function chooseSourceForEpisode(
         groups.map(
             function(g){
                 return {
-                    title:
-                        g.title,
+                    title:g.title,
 
                     subtitle:
                         String(
@@ -4158,17 +5668,16 @@ function chooseSourceForEpisode(
                         )
                         .toUpperCase(),
 
-                    group:
-                        g
+                    group:g
                 };
             }
         ),
 
         function(item){
-            setTimeout(
+            after(
                 function(){
                     resolveAndPlay(
-                        anime,
+                        a,
                         item.group,
 
                         findVideo(
@@ -4176,8 +5685,7 @@ function chooseSourceForEpisode(
                             ep
                         )
                     );
-                },
-                0
+                }
             );
         },
 
@@ -4186,65 +5694,53 @@ function chooseSourceForEpisode(
 }
 
 function watchAnime(
-    anime,
+    a,
     videos,
-    forcedEpisode
+    forced
 ){
     function go(list){
         var eps=
-            episodeNumbers(
-                list
-            );
+            episodeNumbers(list);
 
-        if(
-            !eps.length
-        ){
+        if(!eps.length){
             notify(
                 'Видео для этого тайтла не найдено'
             );
 
             restoreContent();
-
             return;
         }
 
-        var state=
-            watchState(
-                anime
-            );
+        var st=
+            watchState(a);
 
         var ep=
-            forcedEpisode!=null
-                ?forcedEpisode
+            forced!=null
+                ?forced
                 :currentOrFirstEpisode(
-                    anime,
+                    a,
                     list
                 );
 
-        var isResume=
-            forcedEpisode==null&&
+        var resume=
+            forced==null&&
             num(
-                state.episode,
-                0
+                st.episode
             )>
             0;
 
         chooseSourceForEpisode(
-            anime,
+            a,
             list,
             ep,
-            !isResume
+            !resume
         );
     }
 
-    if(videos){
-        go(
-            videos
-        );
-    }
-    else{
-        loadVideos(
-            anime,
+    videos
+        ?go(videos)
+        :loadVideos(
+            a,
             go,
 
             function(){
@@ -4257,49 +5753,40 @@ function watchAnime(
 
             true
         );
-    }
 }
 
 function changeSource(
-    anime,
+    a,
     videos
 ){
     function go(list){
         var ep=
             currentOrFirstEpisode(
-                anime,
+                a,
                 list
             );
 
-        if(
-            ep==
-            null
-        ){
+        if(ep==null){
             notify(
                 'Видео для этого тайтла не найдено'
             );
 
             restoreContent();
-
             return;
         }
 
         chooseSourceForEpisode(
-            anime,
+            a,
             list,
             ep,
             true
         );
     }
 
-    if(videos){
-        go(
-            videos
-        );
-    }
-    else{
-        loadVideos(
-            anime,
+    videos
+        ?go(videos)
+        :loadVideos(
+            a,
             go,
 
             function(){
@@ -4312,28 +5799,24 @@ function changeSource(
 
             true
         );
-    }
 }
 
 function resolveAndPlay(
-    anime,
-    group,
-    video
+    a,
+    g,
+    v
 ){
-    if(!video){
+    if(!v){
         notify(
             'Видео не найдено'
         );
 
         restoreContent();
-
         return;
     }
 
     var url=
-        videoSourceUrl(
-            video
-        );
+        videoSourceUrl(v);
 
     if(!url){
         notify(
@@ -4341,24 +5824,21 @@ function resolveAndPlay(
         );
 
         restoreContent();
-
         return;
     }
 
-    var data=
-        videoData(
-            video
-        );
+    var d=
+        videoData(v);
 
     var direct=
-        video.yani_stream_url||
-        data.yani_stream_url;
+        v.yani_stream_url||
+        d.yani_stream_url;
 
     if(direct){
         launchPlayer(
-            anime,
-            group,
-            video,
+            a,
+            g,
+            v,
 
             {
                 url:
@@ -4367,13 +5847,13 @@ function resolveAndPlay(
                     ),
 
                 quality:
-                    video.yani_stream_quality||
-                    data.yani_stream_quality||
+                    v.yani_stream_quality||
+                    d.yani_stream_quality||
                     'auto',
 
                 qualities:
-                    video.yani_stream_qualities||
-                    data.yani_stream_qualities||
+                    v.yani_stream_qualities||
+                    d.yani_stream_qualities||
                     {
                         auto:
                             normalizeVideoUrl(
@@ -4382,8 +5862,8 @@ function resolveAndPlay(
                     },
 
                 headers:
-                    video.yani_stream_headers||
-                    data.yani_stream_headers||
+                    v.yani_stream_headers||
+                    d.yani_stream_headers||
                     {}
             }
         );
@@ -4410,26 +5890,23 @@ function resolveAndPlay(
             'resolve',
 
             {
-                url:
-                    url,
+                url:url,
 
                 player:
-                    group.kind||
-                    group.player||
+                    g.kind||
+                    g.player||
                     '',
 
                 ua:
-                    (
-                        window.navigator&&
-                        window.navigator.userAgent
-                    )||
+                    window.navigator&&
+                    window.navigator.userAgent||
                     ''
             }
         ),
 
         0,
 
-        function(result){
+        function(r){
             try{
                 Lampa.Loading.stop();
                 net.clear();
@@ -4437,53 +5914,52 @@ function resolveAndPlay(
             catch(e){}
 
             if(
-                !result.stream||
-                !result.stream.url
+                !r.stream||
+                !r.stream.url
             ){
                 notify(
                     'Прямой поток не найден'
                 );
 
                 restoreContent();
-
                 return;
             }
 
-            video.yani_stream_url=
-                result.stream.url;
+            v.yani_stream_url=
+                r.stream.url;
 
-            video.yani_stream_quality=
-                result.stream.quality||
+            v.yani_stream_quality=
+                r.stream.quality||
                 '';
 
-            video.yani_stream_qualities=
-                result.stream.qualities||
+            v.yani_stream_qualities=
+                r.stream.qualities||
                 null;
 
-            video.yani_stream_headers=
-                result.stream.headers||
+            v.yani_stream_headers=
+                r.stream.headers||
                 null;
 
             launchPlayer(
-                anime,
-                group,
-                video,
-                result.stream
+                a,
+                g,
+                v,
+                r.stream
             );
         },
 
-        function(error){
+        function(e){
             try{
                 Lampa.Loading.stop();
                 net.clear();
             }
-            catch(e){}
+            catch(x){}
 
             notify(
                 'Источник не открылся: '+
                 clean(
-                    error&&
-                    error.message||
+                    e&&
+                    e.message||
                     'ошибка'
                 )
             );
@@ -4510,81 +5986,73 @@ function extension(url){
 }
 
 function launchPlayer(
-    anime,
-    group,
-    video,
+    a,
+    g,
+    v,
     stream
 ){
     var url=
         stream.url;
 
     var ext=
-        extension(
-            url
-        );
+        extension(url);
 
-    var previous=
-        watchState(
-            anime
-        );
+    var old=
+        watchState(a);
 
     var same=
         Math.abs(
             num(
-                previous.episode,
-                0
+                old.episode
             )-
             num(
-                video._ahEpisode,
-                0
+                v._ahEpisode
             )
         )<
-        0.0001;
+        .0001;
 
-    var resumeTime=
+    var time=
         same&&
-        !previous.completed
+        !old.completed
             ?num(
-                previous.position,
-                0
+                old.position
             )
             :0;
 
     saveWatchState(
-        anime,
+        a,
 
         {
             episode:
-                video._ahEpisode,
+                v._ahEpisode,
 
             videoId:
-                video.video_id||
-                video.id||
+                v.video_id||
+                v.id||
                 '',
 
             providerKey:
-                group.key,
+                g.key,
 
             provider:
-                group.kind,
+                g.kind,
 
             dubbing:
-                group.title,
+                g.title,
 
             position:
-                resumeTime,
+                time,
 
             duration:
                 same
                     ?num(
-                        previous.duration,
-                        0
+                        old.duration
                     )
                     :0,
 
             completed:
                 same
-                    ?!!previous.completed
+                    ?!!old.completed
                     :false
         }
     );
@@ -4592,28 +6060,22 @@ function launchPlayer(
     var item={
         title:
             (
-                anime.title||
+                a.title||
                 'AnimeHub'
             )+
             ' • Серия '+
-            video._ahEpisode+
+            v._ahEpisode+
             ' • '+
-            group.title,
+            g.title,
 
-        url:
-            url,
-
-        time:
-            resumeTime,
-
-        isonline:
-            true,
+        url:url,
+        time:time,
+        isonline:true,
 
         quality:
             stream.qualities||
             {
-                auto:
-                    url
+                auto:url
             },
 
         headers:
@@ -4621,23 +6083,21 @@ function launchPlayer(
             {},
 
         poster:
-            anime.poster||
+            a.poster||
             '',
 
         animehub_anime:
-            compactAnime(
-                anime
-            ),
+            compactAnime(a),
 
         animehub_episode:
-            video._ahEpisode,
+            v._ahEpisode,
 
         animehub_provider_key:
-            group.key,
+            g.key,
 
         animehub_video_id:
-            video.video_id||
-            video.id||
+            v.video_id||
+            v.id||
             ''
     };
 
@@ -4709,8 +6169,7 @@ function installPlaybackTracker(){
         return;
     }
 
-    window[key]=
-        true;
+    window[key]=true;
 
     Lampa.Player.listener.follow(
         'start',
@@ -4723,88 +6182,75 @@ function installPlaybackTracker(){
                 return;
             }
 
-            var anime=
+            var a=
                 data.animehub_anime;
 
-            var episode=
+            var ep=
                 data.animehub_episode;
 
-            var lastSave=0;
+            var last=0;
             var active=true;
 
-            function timeupdate(e){
+            function tick(e){
                 if(
                     !active||
                     Date.now()-
-                    lastSave<
+                    last<
                     10000
                 ){
                     return;
                 }
 
-                lastSave=
+                last=
                     Date.now();
 
-                var current=
+                var cur=
                     num(
                         e&&
-                        e.current,
-                        0
+                        e.current
                     );
 
-                var duration=
+                var dur=
                     num(
                         e&&
-                        e.duration,
-                        0
+                        e.duration
                     );
 
-                if(
-                    current<=
-                    0
-                ){
-                    return;
+                if(cur>0){
+                    saveWatchState(
+                        a,
+
+                        {
+                            episode:ep,
+
+                            videoId:
+                                data.animehub_video_id||
+                                '',
+
+                            providerKey:
+                                data.animehub_provider_key||
+                                '',
+
+                            position:cur,
+                            duration:dur,
+
+                            completed:
+                                dur>0&&
+                                cur>=
+                                dur-
+                                25
+                        }
+                    );
                 }
-
-                saveWatchState(
-                    anime,
-
-                    {
-                        episode:
-                            episode,
-
-                        videoId:
-                            data.animehub_video_id||
-                            '',
-
-                        providerKey:
-                            data.animehub_provider_key||
-                            '',
-
-                        position:
-                            current,
-
-                        duration:
-                            duration,
-
-                        completed:
-                            duration>0&&
-                            current>=
-                            duration-
-                            25
-                    }
-                );
             }
 
             function ended(){
                 if(active){
                     saveWatchState(
-                        anime,
+                        a,
 
                         {
-                            episode:
-                                episode,
-
+                            episode:ep,
                             position:0,
                             duration:0,
                             completed:true
@@ -4819,7 +6265,7 @@ function installPlaybackTracker(){
                 try{
                     Lampa.PlayerVideo.listener.remove(
                         'timeupdate',
-                        timeupdate
+                        tick
                     );
 
                     Lampa.PlayerVideo.listener.remove(
@@ -4837,7 +6283,7 @@ function installPlaybackTracker(){
 
             Lampa.PlayerVideo.listener.follow(
                 'timeupdate',
-                timeupdate
+                tick
             );
 
             Lampa.PlayerVideo.listener.follow(
@@ -4853,95 +6299,13 @@ function installPlaybackTracker(){
     );
 }
 
+
 /* ============================================================
- * DETAIL - CUSTOM HERO + LAMPA SCROLL + NATIVE LINES
+ * DETAIL
  * ============================================================ */
 
 function detailNav(){
-    var top=
-        $('<div class="ah130-detail-top"></div>');
-
-    var brand=
-        $('<div class="ah130-brand"></div>')
-        .append(
-            toriiSvg(
-                'ah130-logo'
-            ),
-
-            '<span class="ah130-name">'+
-                'AnimeHub'+
-            '</span>'
-        );
-
-    var nav=
-        $('<div class="ah130-nav"></div>');
-
-    function add(
-        title,
-        action
-    ){
-        var b=
-            $('<div class="ah130-navbtn selector"></div>')
-            .text(
-                title
-            );
-
-        b.on(
-            'hover:enter click',
-
-            function(e){
-                if(e){
-                    e.preventDefault();
-                }
-
-                action();
-            }
-        );
-
-        nav.append(
-            b
-        );
-    }
-
-    add(
-        'Главная',
-        openHome
-    );
-
-    add(
-        'Каталог',
-
-        function(){
-            openCatalog(
-                'all',
-                '',
-                'Каталог',
-                1
-            );
-        }
-    );
-
-    add(
-        'Поиск',
-        openSearch
-    );
-
-    add(
-        'Расписание',
-        openSchedule
-    );
-
-    add(
-        'Избранное',
-        openFavorites
-    );
-
-    top.append(
-        brand,
-        nav
-    );
-
-    return top;
+    return topNav('');
 }
 
 function DetailComponent(object){
@@ -4956,7 +6320,7 @@ function DetailComponent(object){
         });
 
     var root=
-        $('<div class="ah130-detail-wrap"></div>');
+        $('<div class="ah140-detail-wrap"></div>');
 
     var initial=
         object.ah_item||
@@ -4972,9 +6336,10 @@ function DetailComponent(object){
     var episodeLine=null;
     var recommendLine=null;
 
-    var selectedRangeStart=null;
+    var rangeStart=null;
 
     var alive=false;
+
 
     function bindFocus(){
         root
@@ -4989,119 +6354,100 @@ function DetailComponent(object){
                 '.selector',
 
                 function(){
-                    last=
-                        this;
+                    last=this;
 
                     try{
-                        scroll.update(
-                            this
-                        );
+                        scroll.update(this);
                     }
                     catch(e){}
                 }
             );
     }
 
+
     function startController(){
         Lampa.Controller.add(
             'content',
 
             {
-                link:
-                    this,
+                link:this,
 
-                toggle:
-                    function(){
-                        try{
-                            scroll.restorePosition();
+                toggle:function(){
+                    try{
+                        scroll.restorePosition();
 
-                            Lampa.Controller.collectionSet(
-                                scroll.render(
-                                    true
-                                )
-                            );
-
-                            Lampa.Controller.collectionFocus(
-                                last||
-                                root.find(
-                                    '.selector'
-                                )[0]||
-                                false,
-
-                                scroll.render(
-                                    true
-                                )
-                            );
-                        }
-                        catch(e){}
-                    },
-
-                left:
-                    function(){
-                        if(
-                            Navigator.canmove(
-                                'left'
+                        Lampa.Controller.collectionSet(
+                            scroll.render(
+                                true
                             )
-                        ){
-                            Navigator.move(
-                                'left'
-                            );
-                        }
-                        else{
-                            Lampa.Controller.toggle(
-                                'menu'
-                            );
-                        }
-                    },
+                        );
 
-                right:
-                    function(){
-                        if(
-                            Navigator.canmove(
-                                'right'
+                        Lampa.Controller.collectionFocus(
+                            last||
+                            root.find(
+                                '.selector'
+                            )[0]||
+                            false,
+
+                            scroll.render(
+                                true
                             )
-                        ){
-                            Navigator.move(
-                                'right'
-                            );
-                        }
-                    },
-
-                up:
-                    function(){
-                        if(
-                            Navigator.canmove(
-                                'up'
-                            )
-                        ){
-                            Navigator.move(
-                                'up'
-                            );
-                        }
-                        else{
-                            Lampa.Controller.toggle(
-                                'head'
-                            );
-                        }
-                    },
-
-                down:
-                    function(){
-                        if(
-                            Navigator.canmove(
-                                'down'
-                            )
-                        ){
-                            Navigator.move(
-                                'down'
-                            );
-                        }
-                    },
-
-                back:
-                    function(){
-                        Lampa.Activity.backward();
+                        );
                     }
+                    catch(e){}
+                },
+
+                left:function(){
+                    Navigator.canmove(
+                        'left'
+                    )
+                        ?Navigator.move(
+                            'left'
+                        )
+                        :Lampa.Controller.toggle(
+                            'menu'
+                        );
+                },
+
+                right:function(){
+                    if(
+                        Navigator.canmove(
+                            'right'
+                        )
+                    ){
+                        Navigator.move(
+                            'right'
+                        );
+                    }
+                },
+
+                up:function(){
+                    Navigator.canmove(
+                        'up'
+                    )
+                        ?Navigator.move(
+                            'up'
+                        )
+                        :Lampa.Controller.toggle(
+                            'head'
+                        );
+                },
+
+                down:function(){
+                    if(
+                        Navigator.canmove(
+                            'down'
+                        )
+                    ){
+                        Navigator.move(
+                            'down'
+                        );
+                    }
+                },
+
+                back:function(){
+                    Lampa.Activity.backward();
+                }
             }
         );
 
@@ -5110,40 +6456,36 @@ function DetailComponent(object){
         );
     }
 
+
     function infoRow(
-        panel,
-        label,
-        value
+        p,
+        k,
+        v
     ){
         if(
-            value===''||
-            value===null||
-            value===undefined
+            v!==''&&
+            v!==null&&
+            v!==undefined
         ){
-            return;
+            p.append(
+                '<div class="ah140-info">'+
+                    '<span>'+
+                        esc(k)+
+                    '</span>'+
+                    '<span>'+
+                        esc(v)+
+                    '</span>'+
+                '</div>'
+            );
         }
-
-        panel.append(
-            '<div class="ah130-info">'+
-                '<span>'+
-                    esc(
-                        label
-                    )+
-                '</span>'+
-                '<span>'+
-                    esc(
-                        value
-                    )+
-                '</span>'+
-            '</div>'
-        );
     }
+
 
     function infoPanel(a){
         var p=
             $(
-                '<div class="ah130-aside">'+
-                    '<div class="ah130-aside-title">'+
+                '<div class="ah140-aside">'+
+                    '<div class="ah140-aside-title">'+
                         'Информация'+
                     '</div>'+
                 '</div>'
@@ -5154,8 +6496,7 @@ function DetailComponent(object){
             'Рейтинг',
 
             num(
-                a.score,
-                0
+                a.score
             )>0
                 ?'★ '+
                 score(
@@ -5178,9 +6519,7 @@ function DetailComponent(object){
                             return x.title;
                         }
                     )
-                    .join(
-                        ', '
-                    )
+                    .join(', ')
             );
         }
 
@@ -5198,18 +6537,14 @@ function DetailComponent(object){
                             return x.title;
                         }
                     )
-                    .join(
-                        ', '
-                    )
+                    .join(', ')
             );
         }
 
         infoRow(
             p,
             'Тип',
-            typeLabel(
-                a
-            )
+            typeLabel(a)
         );
 
         infoRow(
@@ -5225,9 +6560,7 @@ function DetailComponent(object){
         infoRow(
             p,
             'Эпизоды',
-            episodeCount(
-                a
-            )
+            episodeCount(a)
         );
 
         if(a.duration){
@@ -5269,47 +6602,8 @@ function DetailComponent(object){
         return p;
     }
 
-    function refreshMainButtons(
-        watchBtn,
-        sourceBtn
-    ){
-        var state=
-            watchState(
-                anime
-            );
 
-        var ep=
-            num(
-                state.episode,
-                0
-            );
-
-        watchBtn.text(
-            ep&&
-            !state.completed
-                ?(
-                    '▶ Продолжить • серия '+
-                    ep
-                )
-                :(
-                    ep&&
-                    state.completed
-                        ?'▶ Смотреть дальше'
-                        :'▶ Смотреть'
-                )
-        );
-
-        sourceBtn.text(
-            ep
-                ?(
-                    '🎧 Озвучка / источник • серия '+
-                    ep
-                )
-                :'🎧 Озвучка / источник'
-        );
-    }
-
-    function screenshotFor(
+    function shotFor(
         ep,
         index
     ){
@@ -5324,19 +6618,13 @@ function DetailComponent(object){
                 if(
                     Math.abs(
                         num(
-                            x.episode,
-                            0
+                            x.episode
                         )-
-                        num(
-                            ep,
-                            0
-                        )
+                        num(ep)
                     )<
-                    0.0001
+                    .0001
                 ){
-                    exact=
-                        x;
-
+                    exact=x;
                     return true;
                 }
 
@@ -5367,31 +6655,18 @@ function DetailComponent(object){
             );
     }
 
-    function destroyEpisodeLine(){
-        if(episodeLine){
+
+    function destroyLine(which){
+        if(which){
             try{
-                episodeLine.destroy();
+                which.destroy();
             }
             catch(e){}
-
-            episodeLine=
-                null;
         }
     }
 
-    function destroyRecommendLine(){
-        if(recommendLine){
-            try{
-                recommendLine.destroy();
-            }
-            catch(e){}
 
-            recommendLine=
-                null;
-        }
-    }
-
-    function episodeRangeItems(eps){
+    function rangeItems(eps){
         var max=40;
 
         if(
@@ -5405,7 +6680,7 @@ function DetailComponent(object){
         }
 
         if(
-            selectedRangeStart!=
+            rangeStart!=
             null
         ){
             var s=
@@ -5414,8 +6689,7 @@ function DetailComponent(object){
 
                     Math.min(
                         intv(
-                            selectedRangeStart,
-                            0
+                            rangeStart
                         ),
 
                         eps.length-
@@ -5439,8 +6713,7 @@ function DetailComponent(object){
             num(
                 watchState(
                     anime
-                ).episode,
-                0
+                ).episode
             );
 
         var idx=
@@ -5456,6 +6729,7 @@ function DetailComponent(object){
                     Math.min(
                         eps.length-
                         max,
+
                         idx-
                         8
                     )
@@ -5463,8 +6737,7 @@ function DetailComponent(object){
                 :0;
 
         return {
-            start:
-                start,
+            start:start,
 
             items:
                 eps.slice(
@@ -5475,22 +6748,15 @@ function DetailComponent(object){
         };
     }
 
+
     function chooseRange(eps){
-        var size=40;
         var items=[];
 
         for(
             var s=0;
             s<eps.length;
-            s+=size
+            s+=40
         ){
-            var end=
-                Math.min(
-                    eps.length,
-                    s+
-                    size
-                );
-
             items.push({
                 title:
                     'Серии '+
@@ -5499,10 +6765,13 @@ function DetailComponent(object){
                         1
                     )+
                     '–'+
-                    end,
+                    Math.min(
+                        eps.length,
+                        s+
+                        40
+                    ),
 
-                start:
-                    s
+                start:s
             });
         }
 
@@ -5511,7 +6780,7 @@ function DetailComponent(object){
             items,
 
             function(x){
-                selectedRangeStart=
+                rangeStart=
                     x.start;
 
                 renderEpisodes(
@@ -5520,6 +6789,7 @@ function DetailComponent(object){
             }
         );
     }
+
 
     function renderEpisodes(list){
         videos=
@@ -5531,27 +6801,28 @@ function DetailComponent(object){
                 videos
             );
 
-        destroyEpisodeLine();
-
-        episodeBlock.empty();
-
-        episodeBlock.append(
-            '<div class="ah130-block-title">'+
-                'Эпизоды'+
-            '</div>'
+        destroyLine(
+            episodeLine
         );
 
-        if(
-            !eps.length
-        ){
+        episodeLine=null;
+
+        episodeBlock
+            .empty()
+            .append(
+                '<div class="ah140-block-title">'+
+                    'Эпизоды'+
+                '</div>'
+            );
+
+        if(!eps.length){
             episodeBlock.append(
-                '<div class="ah130-placeholder">'+
+                '<div class="ah140-placeholder">'+
                     'Видео пока не найдено.'+
                 '</div>'
             );
 
             bindFocus();
-
             return;
         }
 
@@ -5559,10 +6830,10 @@ function DetailComponent(object){
             eps.length>
             40
         ){
-            var rangeBtn=
-                $('<div class="ah130-lazy selector">Диапазон серий</div>');
+            var rb=
+                $('<div class="ah140-lazy selector">Диапазон серий</div>');
 
-            rangeBtn.on(
+            rb.on(
                 'hover:enter click',
 
                 function(e){
@@ -5570,31 +6841,25 @@ function DetailComponent(object){
                         e.preventDefault();
                     }
 
-                    chooseRange(
-                        eps
-                    );
+                    chooseRange(eps);
                 }
             );
 
             episodeBlock.append(
                 $(
-                    '<div class="ah130-placeholder">'+
+                    '<div class="ah140-placeholder">'+
                         '<span>'+
                             'Всего серий: '+
                             eps.length+
                         '</span>'+
                     '</div>'
                 )
-                .append(
-                    rangeBtn
-                )
+                .append(rb)
             );
         }
 
         var range=
-            episodeRangeItems(
-                eps
-            );
+            rangeItems(eps);
 
         var cards=
             range.items.map(
@@ -5609,7 +6874,7 @@ function DetailComponent(object){
                         );
 
                     var poster=
-                        screenshotFor(
+                        shotFor(
                             ep,
                             range.start+
                             index
@@ -5627,18 +6892,9 @@ function DetailComponent(object){
                             'Серия '+
                             ep,
 
-                        original:'',
-                        year:null,
-                        score:0,
-
-                        poster:
-                            poster,
-
-                        background:
-                            poster,
-
-                        posterHero:
-                            poster,
+                        poster:poster,
+                        background:poster,
+                        posterHero:poster,
 
                         type:{
                             name:
@@ -5710,20 +6966,18 @@ function DetailComponent(object){
         catch(e){}
     }
 
+
     function loadEpisodes(){
         if(videos){
-            renderEpisodes(
-                videos
-            );
-
+            renderEpisodes(videos);
             return;
         }
 
         episodeBlock.html(
-            '<div class="ah130-block-title">'+
+            '<div class="ah140-block-title">'+
                 'Эпизоды'+
             '</div>'+
-            '<div class="ah130-placeholder">'+
+            '<div class="ah140-placeholder">'+
                 'Загружаем серии…'+
             '</div>'
         );
@@ -5731,11 +6985,9 @@ function DetailComponent(object){
         loadVideos(
             anime,
 
-            function(list){
+            function(v){
                 if(alive){
-                    renderEpisodes(
-                        list
-                    );
+                    renderEpisodes(v);
                 }
             },
 
@@ -5745,13 +6997,13 @@ function DetailComponent(object){
                 }
 
                 episodeBlock.html(
-                    '<div class="ah130-block-title">'+
+                    '<div class="ah140-block-title">'+
                         'Эпизоды'+
                     '</div>'
                 );
 
                 var retry=
-                    $('<div class="ah130-lazy selector">Повторить загрузку серий</div>');
+                    $('<div class="ah140-lazy selector">Повторить загрузку серий</div>');
 
                 retry.on(
                     'hover:enter click',
@@ -5760,13 +7012,11 @@ function DetailComponent(object){
 
                 episodeBlock.append(
                     $(
-                        '<div class="ah130-placeholder">'+
+                        '<div class="ah140-placeholder">'+
                             'Не удалось загрузить серии.'+
                         '</div>'
                     )
-                    .append(
-                        retry
-                    )
+                    .append(retry)
                 );
 
                 bindFocus();
@@ -5776,16 +7026,17 @@ function DetailComponent(object){
         );
     }
 
+
     function loadRecommendations(){
         if(recommendLine){
             return;
         }
 
         recommendBlock.html(
-            '<div class="ah130-block-title">'+
+            '<div class="ah140-block-title">'+
                 'Похожие аниме'+
             '</div>'+
-            '<div class="ah130-placeholder">'+
+            '<div class="ah140-placeholder">'+
                 'Загружаем…'+
             '</div>'
         );
@@ -5807,7 +7058,7 @@ function DetailComponent(object){
 
             20,
 
-            function(data){
+            function(d){
                 if(!alive){
                     return;
                 }
@@ -5815,20 +7066,18 @@ function DetailComponent(object){
                 recommendBlock
                     .empty()
                     .append(
-                        '<div class="ah130-block-title">'+
+                        '<div class="ah140-block-title">'+
                             'Похожие аниме'+
                         '</div>'
                     );
 
                 var items=
-                    data.items||
+                    d.items||
                     [];
 
-                if(
-                    !items.length
-                ){
+                if(!items.length){
                     recommendBlock.append(
-                        '<div class="ah130-placeholder">'+
+                        '<div class="ah140-placeholder">'+
                             'Похожих аниме не найдено.'+
                         '</div>'
                     );
@@ -5880,10 +7129,10 @@ function DetailComponent(object){
 
             function(){
                 recommendBlock.html(
-                    '<div class="ah130-block-title">'+
+                    '<div class="ah140-block-title">'+
                         'Похожие аниме'+
                     '</div>'+
-                    '<div class="ah130-placeholder">'+
+                    '<div class="ah140-placeholder">'+
                         'Не удалось загрузить похожие аниме.'+
                     '</div>'
                 );
@@ -5896,16 +7145,12 @@ function DetailComponent(object){
         );
     }
 
+
     function render(a){
-        anime=
-            a;
+        anime=a;
+        videos=null;
 
-        videos=
-            null;
-
-        saveRecent(
-            a
-        );
+        saveRecent(a);
 
         root
             .empty()
@@ -5914,7 +7159,7 @@ function DetailComponent(object){
             );
 
         var hero=
-            $('<div class="ah130-detail"></div>');
+            $('<div class="ah140-detail"></div>');
 
         var bg=
             a.background||
@@ -5926,20 +7171,20 @@ function DetailComponent(object){
             hero.append(
                 imageElement(
                     bg,
-                    'ah130-bg'
+                    'ah140-bg'
                 )
             );
         }
 
         hero.append(
-            '<div class="ah130-shade"></div>'
+            '<div class="ah140-shade"></div>'
         );
 
         var inner=
-            $('<div class="ah130-detail-inner"></div>');
+            $('<div class="ah140-detail-inner"></div>');
 
         var poster=
-            $('<div class="ah130-poster"></div>');
+            $('<div class="ah140-poster"></div>');
 
         if(
             a.posterDetail||
@@ -5955,13 +7200,13 @@ function DetailComponent(object){
         }
 
         var main=
-            $('<div class="ah130-detail-main"></div>');
+            $('<div class="ah140-detail-main"></div>');
 
         main.append(
-            '<div class="ah130-kicker">'+
+            '<div class="ah140-kicker">'+
                 'AnimeHub • YummyAnime'+
             '</div>'+
-            '<div class="ah130-detail-title">'+
+            '<div class="ah140-detail-title">'+
                 esc(
                     a.title||
                     'Anime'
@@ -5975,7 +7220,7 @@ function DetailComponent(object){
             a.title
         ){
             main.append(
-                '<div class="ah130-original">'+
+                '<div class="ah140-original">'+
                     esc(
                         a.original
                     )+
@@ -5984,16 +7229,16 @@ function DetailComponent(object){
         }
 
         var meta=
-            $('<div class="ah130-meta"></div>');
+            $('<div class="ah140-meta"></div>');
 
         if(
             num(
-                a.score,
-                0
-            )>0
+                a.score
+            )>
+            0
         ){
             meta.append(
-                '<span class="ah130-chip ah130-score">'+
+                '<span class="ah140-chip ah140-score">'+
                     '★ '+
                     esc(
                         score(
@@ -6006,7 +7251,7 @@ function DetailComponent(object){
 
         if(a.year){
             meta.append(
-                '<span class="ah130-chip">'+
+                '<span class="ah140-chip">'+
                     esc(
                         a.year
                     )+
@@ -6015,11 +7260,9 @@ function DetailComponent(object){
         }
 
         meta.append(
-            '<span class="ah130-chip">'+
+            '<span class="ah140-chip">'+
                 esc(
-                    typeLabel(
-                        a
-                    )
+                    typeLabel(a)
                 )+
             '</span>'
         );
@@ -6029,7 +7272,7 @@ function DetailComponent(object){
             a.status.alias
         ){
             meta.append(
-                '<span class="ah130-chip">'+
+                '<span class="ah140-chip">'+
                     esc(
                         statusLabel(
                             a.status.alias
@@ -6044,7 +7287,7 @@ function DetailComponent(object){
             a.age.title
         ){
             meta.append(
-                '<span class="ah130-chip">'+
+                '<span class="ah140-chip">'+
                     esc(
                         a.age.title
                     )+
@@ -6052,16 +7295,14 @@ function DetailComponent(object){
             );
         }
 
-        main.append(
-            meta
-        );
+        main.append(meta);
 
         if(
             a.studios&&
             a.studios.length
         ){
             main.append(
-                '<div class="ah130-studio">'+
+                '<div class="ah140-studio">'+
                     'Студия: '+
                     esc(
                         a.studios
@@ -6070,16 +7311,14 @@ function DetailComponent(object){
                                     return x.title;
                                 }
                             )
-                            .join(
-                                ', '
-                            )
+                            .join(', ')
                     )+
                 '</div>'
             );
         }
 
         var genres=
-            $('<div class="ah130-meta"></div>');
+            $('<div class="ah140-meta"></div>');
 
         (
             a.genres||
@@ -6092,7 +7331,7 @@ function DetailComponent(object){
         .forEach(
             function(g){
                 genres.append(
-                    '<span class="ah130-chip">'+
+                    '<span class="ah140-chip">'+
                         esc(
                             g.title
                         )+
@@ -6101,22 +7340,20 @@ function DetailComponent(object){
             }
         );
 
-        main.append(
-            genres
-        );
+        main.append(genres);
 
-        var description=
-            cleanDescription(
+        var text=
+            desc(
                 a.description||
                 ''
             );
 
         main.append(
-            '<div class="ah130-desc">'+
+            '<div class="ah140-desc">'+
                 esc(
-                    description
+                    text
                         ?clip(
-                            description,
+                            text,
                             500
                         )
                         :'Описание пока отсутствует.'
@@ -6124,20 +7361,54 @@ function DetailComponent(object){
             '</div>'
         );
 
-        var actions=
-            $('<div class="ah130-actions"></div>');
+        var acts=
+            $('<div class="ah140-actions"></div>');
 
         var watchBtn=
-            $('<div class="ah130-btn primary selector">▶ Смотреть</div>');
+            $('<div class="ah140-btn primary selector"></div>');
 
         var sourceBtn=
-            $('<div class="ah130-btn selector">🎧 Озвучка / источник</div>');
+            $('<div class="ah140-btn selector"></div>');
 
-        var favBtn=
-            $('<div class="ah130-btn selector"></div>');
+        var fav=
+            $('<div class="ah140-btn selector"></div>');
 
-        function refreshFav(){
-            favBtn.text(
+        function refresh(){
+            var st=
+                watchState(
+                    anime
+                );
+
+            var ep=
+                num(
+                    st.episode
+                );
+
+            watchBtn.text(
+                ep&&
+                !st.completed
+                    ?(
+                        '▶ Продолжить • серия '+
+                        ep
+                    )
+                    :(
+                        ep&&
+                        st.completed
+                            ?'▶ Смотреть дальше'
+                            :'▶ Смотреть'
+                    )
+            );
+
+            sourceBtn.text(
+                ep
+                    ?(
+                        '🎧 Озвучка / источник • серия '+
+                        ep
+                    )
+                    :'🎧 Озвучка / источник'
+            );
+
+            fav.text(
                 isFavorite(
                     anime
                 )
@@ -6146,12 +7417,7 @@ function DetailComponent(object){
             );
         }
 
-        refreshFav();
-
-        refreshMainButtons(
-            watchBtn,
-            sourceBtn
-        );
+        refresh();
 
         watchBtn.on(
             'hover:enter click',
@@ -6183,7 +7449,7 @@ function DetailComponent(object){
             }
         );
 
-        favBtn.on(
+        fav.on(
             'hover:enter click',
 
             function(e){
@@ -6199,43 +7465,34 @@ function DetailComponent(object){
                         :'Удалено из избранного'
                 );
 
-                refreshFav();
+                refresh();
             }
         );
 
-        actions.append(
+        acts.append(
             watchBtn,
             sourceBtn,
-            favBtn
+            fav
         );
 
-        main.append(
-            actions
-        );
+        main.append(acts);
 
         inner.append(
             poster,
             main,
-            infoPanel(
-                a
-            )
+            infoPanel(a)
         );
 
-        hero.append(
-            inner
-        );
-
-        root.append(
-            hero
-        );
+        hero.append(inner);
+        root.append(hero);
 
         episodeBlock=
-            $('<div class="ah130-block"></div>');
+            $('<div class="ah140-block"></div>');
 
-        var loadEp=
-            $('<div class="ah130-lazy selector">Загрузить серии</div>');
+        var load=
+            $('<div class="ah140-lazy selector">Загрузить серии</div>');
 
-        loadEp.on(
+        load.on(
             'hover:enter click',
 
             function(e){
@@ -6248,20 +7505,18 @@ function DetailComponent(object){
         );
 
         episodeBlock.append(
-            '<div class="ah130-block-title">'+
+            '<div class="ah140-block-title">'+
                 'Эпизоды'+
             '</div>',
 
             $(
-                '<div class="ah130-placeholder">'+
+                '<div class="ah140-placeholder">'+
                     '<span>'+
                         'Не загружаем видео автоматически — быстрее для TV.'+
                     '</span>'+
                 '</div>'
             )
-            .append(
-                loadEp
-            )
+            .append(load)
         );
 
         root.append(
@@ -6274,15 +7529,15 @@ function DetailComponent(object){
         ){
             var shots=
                 $(
-                    '<div class="ah130-block">'+
-                        '<div class="ah130-block-title">'+
+                    '<div class="ah140-block">'+
+                        '<div class="ah140-block-title">'+
                             'Кадры'+
                         '</div>'+
                     '</div>'
                 );
 
             var row=
-                $('<div class="ah130-shots"></div>');
+                $('<div class="ah140-shots"></div>');
 
             a.screenshots
                 .slice(
@@ -6292,7 +7547,7 @@ function DetailComponent(object){
                 .forEach(
                     function(s){
                         var box=
-                            $('<div class="ah130-shot"></div>');
+                            $('<div class="ah140-shot"></div>');
 
                         if(
                             s.small||
@@ -6307,46 +7562,37 @@ function DetailComponent(object){
                             );
                         }
 
-                        row.append(
-                            box
-                        );
+                        row.append(box);
                     }
                 );
 
-            shots.append(
-                row
-            );
-
-            root.append(
-                shots
-            );
+            shots.append(row);
+            root.append(shots);
         }
 
         if(
-            description.length>
+            text.length>
             500
         ){
             root.append(
-                '<div class="ah130-block">'+
-                    '<div class="ah130-block-title">'+
+                '<div class="ah140-block">'+
+                    '<div class="ah140-block-title">'+
                         'Описание'+
                     '</div>'+
-                    '<div class="ah130-longdesc">'+
-                        esc(
-                            description
-                        )+
+                    '<div class="ah140-longdesc">'+
+                        esc(text)+
                     '</div>'+
                 '</div>'
             );
         }
 
         recommendBlock=
-            $('<div class="ah130-block"></div>');
+            $('<div class="ah140-block"></div>');
 
-        var recBtn=
-            $('<div class="ah130-lazy selector">Показать похожие</div>');
+        var rec=
+            $('<div class="ah140-lazy selector">Показать похожие</div>');
 
-        recBtn.on(
+        rec.on(
             'hover:enter click',
 
             function(e){
@@ -6359,20 +7605,18 @@ function DetailComponent(object){
         );
 
         recommendBlock.append(
-            '<div class="ah130-block-title">'+
+            '<div class="ah140-block-title">'+
                 'Похожие аниме'+
             '</div>',
 
             $(
-                '<div class="ah130-placeholder">'+
+                '<div class="ah140-placeholder">'+
                     '<span>'+
                         'Загружаются только по запросу.'+
                     '</span>'+
                 '</div>'
             )
-            .append(
-                recBtn
-            )
+            .append(rec)
         );
 
         root.append(
@@ -6398,14 +7642,13 @@ function DetailComponent(object){
         catch(e){}
     }
 
+
     this.create=function(){
         alive=true;
 
         scroll.minus();
 
-        scroll.append(
-            root
-        );
+        scroll.append(root);
 
         root.html(
             loaderHtml(
@@ -6427,17 +7670,17 @@ function DetailComponent(object){
 
             8,
 
-            function(data){
+            function(d){
                 if(alive){
                     render(
-                        data.anime
+                        d.anime
                     );
                 }
             },
 
             function(){
                 root.html(
-                    '<div class="ah130-placeholder">'+
+                    '<div class="ah140-placeholder">'+
                         'Не удалось загрузить карточку.'+
                     '</div>'
                 );
@@ -6447,50 +7690,53 @@ function DetailComponent(object){
         return scroll.render();
     };
 
+
     this.start=function(){
         if(
-            Lampa.Activity.active().activity!==
+            Lampa.Activity.active().activity===
             this.activity
         ){
-            return;
+            startController.call(
+                this
+            );
         }
-
-        startController.call(
-            this
-        );
     };
 
-    this.pause=
-        function(){};
 
-    this.stop=
-        function(){};
+    this.pause=function(){};
+    this.stop=function(){};
 
-    this.render=
-        function(){
-            return scroll.render();
-        };
 
-    this.destroy=
-        function(){
-            alive=false;
+    this.render=function(){
+        return scroll.render();
+    };
 
-            try{
-                net.clear();
-            }
-            catch(e){}
 
-            destroyEpisodeLine();
-            destroyRecommendLine();
+    this.destroy=function(){
+        alive=false;
 
-            try{
-                scroll.destroy();
-            }
-            catch(e){}
+        try{
+            net.clear();
+        }
+        catch(e){}
 
-            root.remove();
-        };
+        destroyLine(
+            episodeLine
+        );
+
+        destroyLine(
+            recommendLine
+        );
+
+        try{
+            scroll.destroy();
+        }
+        catch(e){}
+
+        root.remove();
+    };
 }
+
 
 /* ============================================================
  * MENU / BOOT
@@ -6539,7 +7785,7 @@ function addMenuButton(){
         return;
     }
 
-    var button=
+    var b=
         $(
             '<li class="menu__item selector" data-action="'+
             NS+
@@ -6553,16 +7799,14 @@ function addMenuButton(){
             '</li>'
         );
 
-    button.on(
+    b.on(
         'hover:enter click',
         openHome
     );
 
     $('.menu .menu__list')
         .eq(0)
-        .append(
-            button
-        );
+        .append(b);
 }
 
 function init(){
@@ -6581,9 +7825,7 @@ function init(){
     ]=
         true;
 
-    if(
-        !nativeReady()
-    ){
+    if(!nativeReady()){
         notify(
             'AnimeHub V'+
             VERSION+
@@ -6595,7 +7837,6 @@ function init(){
 
     try{
         injectStyle();
-
         installPlaybackTracker();
 
         Lampa.Component.add(
@@ -6623,12 +7864,27 @@ function init(){
             FavoritesComponent
         );
 
+        Lampa.Component.add(
+            GENRES,
+            GenresComponent
+        );
+
+        Lampa.Component.add(
+            COLLECTIONS,
+            CollectionsComponent
+        );
+
+        Lampa.Component.add(
+            COLLECTION,
+            CollectionComponent
+        );
+
         addMenuButton();
 
         notify(
             'AnimeHub V'+
             VERSION+
-            ' Native загружен'
+            ' Native Catalogue загружен'
         );
     }
     catch(e){
@@ -6644,9 +7900,7 @@ function init(){
     }
 }
 
-if(
-    window.appready
-){
+if(window.appready){
     init();
 }
 else{
