@@ -1,8 +1,14 @@
 (function(){
 'use strict';
 
-var VERSION='1.0.1';
-var NS='animehub_v101';
+/*
+ * AnimeHub V1.1.0 Lite
+ * YummyAnime-first
+ * LG WebOS performance-oriented
+ */
+
+var VERSION='1.1.0';
+var NS='animehub_v110';
 
 var HOME=NS+'_home';
 var CATALOG=NS+'_catalog';
@@ -14,14 +20,23 @@ var FAVORITES_KEY='animehub_v010_favorites';
 var RECENT_KEY='animehub_v010_recent';
 var WATCH_KEY='animehub_v020_watch';
 
-var WORKER='https://animehub-lampa.kalewse69.workers.dev/';
+var WORKER=
+    'https://animehub-lampa.kalewse69.workers.dev/';
 
-var memoryCache={};
+var cache={};
+var cacheOrder=[];
+var CACHE_MAX=36;
+
 var videoCache={};
+var videoOrder=[];
+var VIDEO_CACHE_MAX=6;
+
+var videoInflight={};
 var genresCache=null;
 
+
 /* ============================================================
- * HELPERS
+ * BASICS
  * ============================================================ */
 
 function notify(t){
@@ -42,7 +57,7 @@ function clean(v){
     .trim();
 }
 
-function cleanDescription(v){
+function desc(v){
     return clean(
         String(
             v==null
@@ -73,13 +88,14 @@ function esc(v){
     .replace(/'/g,'&#39;');
 }
 
-function clip(v,n){
+function clip(v,l){
     v=clean(v);
 
-    return !n||v.length<=n
+    return !l||
+        v.length<=l
         ?v
         :v
-            .slice(0,n)
+            .slice(0,l)
             .replace(
                 /\s+\S*$/,
                 ''
@@ -96,15 +112,18 @@ function num(v,d){
 }
 
 function intv(v,d){
-    v=parseInt(v,10);
+    v=parseInt(
+        v,
+        10
+    );
 
     return isNaN(v)
         ?(d||0)
         :v;
 }
 
-function formatScore(v){
-    v=num(v,0);
+function score(v){
+    v=num(v);
 
     return v
         ?v
@@ -114,7 +133,7 @@ function formatScore(v){
         :'—';
 }
 
-function statusLabel(v){
+function status(v){
     return ({
         ongoing:'Онгоинг',
         released:'Вышло',
@@ -139,11 +158,50 @@ function typeLabel(a){
     'Аниме';
 }
 
+function epCount(a){
+    var e=
+        a&&
+        a.episodes||
+        {};
+
+    var x=
+        intv(
+            e.aired
+        );
+
+    var y=
+        intv(
+            e.count
+        );
+
+    if(
+        y&&
+        x&&
+        x<y
+    ){
+        return (
+            x+
+            ' / '+
+            y
+        );
+    }
+
+    if(y){
+        return String(y);
+    }
+
+    if(x){
+        return String(x);
+    }
+
+    return '—';
+}
+
 function formatDate(
     ts,
-    withTime
+    time
 ){
-    ts=num(ts,0);
+    ts=num(ts);
 
     if(!ts){
         return '';
@@ -156,19 +214,19 @@ function formatDate(
                 1000
             );
 
-        var options={
+        var o={
             day:'numeric',
             month:'short'
         };
 
-        if(withTime){
-            options.hour='2-digit';
-            options.minute='2-digit';
+        if(time){
+            o.hour='2-digit';
+            o.minute='2-digit';
         }
 
         return d.toLocaleString(
             'ru-RU',
-            options
+            o
         );
     }
     catch(e){
@@ -176,83 +234,41 @@ function formatDate(
     }
 }
 
-function episodeCount(a){
-    var e=
-        a&&
-        a.episodes||
-        {};
-
-    var aired=
-        intv(
-            e.aired,
-            0
-        );
-
-    var count=
-        intv(
-            e.count,
-            0
-        );
-
-    if(
-        count&&
-        aired&&
-        aired<count
-    ){
-        return (
-            aired+
-            ' / '+
-            count
-        );
-    }
-
-    if(count){
-        return String(count);
-    }
-
-    if(aired){
-        return String(aired);
-    }
-
-    return '—';
-}
-
 function workerUrl(
     path,
-    params
+    p
 ){
+    var q=[];
+
     var base=
         WORKER.replace(
             /\/?$/,
             '/'
         );
 
-    var q=[];
+    p=p||{};
 
-    params=params||{};
+    Object.keys(p)
+        .forEach(
+            function(k){
+                var v=
+                    p[k];
 
-    Object.keys(params)
-        .forEach(function(k){
-
-            var v=
-                params[k];
-
-            if(
-                v===undefined||
-                v===null||
-                String(v)===''
-            ){
-                return;
+                if(
+                    v!==undefined&&
+                    v!==null&&
+                    String(v)!==''
+                ){
+                    q.push(
+                        encodeURIComponent(k)+
+                        '='+
+                        encodeURIComponent(
+                            String(v)
+                        )
+                    );
+                }
             }
-
-            q.push(
-                encodeURIComponent(k)+
-                '='+
-                encodeURIComponent(
-                    String(v)
-                )
-            );
-        });
+        );
 
     return (
         base+
@@ -293,6 +309,36 @@ function parseJson(v){
     }
 }
 
+function remember(
+    key,
+    data
+){
+    if(cache[key]){
+        cacheOrder=
+            cacheOrder.filter(
+                function(x){
+                    return x!==key;
+                }
+            );
+    }
+
+    cache[key]={
+        at:Date.now(),
+        data:data
+    };
+
+    cacheOrder.push(key);
+
+    while(
+        cacheOrder.length>
+        CACHE_MAX
+    ){
+        delete cache[
+            cacheOrder.shift()
+        ];
+    }
+}
+
 function requestJson(
     net,
     url,
@@ -302,39 +348,29 @@ function requestJson(
     net.silent(
         url,
 
-        function(response){
-
-            var data=
-                parseJson(
-                    response
-                );
+        function(r){
+            var d=
+                parseJson(r);
 
             if(
-                !data||
-                data.ok===false
+                !d||
+                d.ok===false
             ){
                 if(fail){
                     fail({
-                        status:
-                            data&&
-                            data.upstreamStatus||
-                            0,
-
                         message:
-                            data&&
-                            data.error||
+                            d&&
+                            d.error||
                             'Ошибка AnimeHub Worker',
 
-                        data:data
+                        data:d
                     });
                 }
 
                 return;
             }
 
-            if(ok){
-                ok(data);
-            }
+            ok(d);
         },
 
         function(e){
@@ -359,19 +395,19 @@ function requestCached(
     ok,
     fail
 ){
-    var cached=
-        memoryCache[key];
+    var h=
+        cache[key];
 
     if(
-        cached&&
+        h&&
         Date.now()-
-        cached.time<
+        h.at<
         age
     ){
         setTimeout(
             function(){
                 ok(
-                    cached.data
+                    h.data
                 );
             },
             0
@@ -384,57 +420,58 @@ function requestCached(
         net,
         url,
 
-        function(data){
+        function(d){
+            remember(
+                key,
+                d
+            );
 
-            memoryCache[key]={
-                time:Date.now(),
-                data:data
-            };
-
-            ok(data);
+            ok(d);
         },
 
         fail
     );
 }
 
+
 /* ============================================================
  * TORII
  * ============================================================ */
 
-function toriiSvg(cls){
+function torii(cls){
     return (
         '<svg class="'+
         esc(cls||'')+
-        '" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">'+
+        '" viewBox="0 0 96 96" '+
+        'xmlns="http://www.w3.org/2000/svg">'+
 
         '<defs>'+
-            '<linearGradient id="ahg" x1="0" y1="0" x2="1" y2="1">'+
+            '<linearGradient id="aht" x1="0" y1="0" x2="1" y2="1">'+
                 '<stop offset="0" stop-color="#a970ff"/>'+
                 '<stop offset="1" stop-color="#ed5fd4"/>'+
             '</linearGradient>'+
         '</defs>'+
 
-        '<path fill="url(#ahg)" d="'+
-            'M13 20h70l-3.4 10.5c-20.9 4.1-42.3 4.1-63.2 0L13 20z '+
-            'M21 37h54v8H21z '+
-            'M29 48h9v29h-9z '+
-            'M58 48h9v29h-9z '+
-            'M24 77h19v7H24z '+
-            'M53 77h19v7H53z'+
+        '<path fill="url(#aht)" d="'+
+            'M13 20h70l-3.4 10.5c-20.9 4.1-42.3 4.1-63.2 0L13 20z'+
+            'm8 17h54v8H21v-8z'+
+            'm8 11h9v29h-9V48z'+
+            'm29 0h9v29h-9V48z'+
+            'm-34 29h19v7H24v-7z'+
+            'm29 0h19v7H53v-7z'+
         '"/>'+
         '</svg>'
     );
 }
 
-function loaderHtml(t){
+function loader(t){
     return (
         '<div class="ah-loader">'+
-            '<div class="ah-loader-orbit"></div>'+
-            toriiSvg(
-                'ah-loader-torii'
+            '<div class="ah-loader-ring"></div>'+
+            torii(
+                'ah-loader-logo'
             )+
-            '<div class="ah-loader-text">'+
+            '<div>'+
                 esc(
                     t||
                     'Загрузка…'
@@ -444,52 +481,52 @@ function loaderHtml(t){
     );
 }
 
+
 /* ============================================================
- * STORAGE
+ * LOCAL STORAGE
  * ============================================================ */
 
-function storedList(key){
+function stored(
+    key,
+    def
+){
     try{
-        var v=
-            Lampa.Storage.get(
-                key,
-                []
-            )||
-            [];
-
-        return Array.isArray(v)
-            ?v
-            :[];
+        return Lampa.Storage.get(
+            key,
+            def
+        );
     }
     catch(e){
-        return [];
+        return def;
     }
 }
 
-function setStoredList(
+function storedList(key){
+    var v=
+        stored(
+            key,
+            []
+        );
+
+    return Array.isArray(v)
+        ?v
+        :[];
+}
+
+function setStored(
     key,
-    value
+    v
 ){
     try{
         Lampa.Storage.set(
             key,
-            value
+            v
         );
     }
     catch(e){}
 }
 
-function animeStorageKey(a){
-    return (
-        'y:'+
-        String(
-            a&&a.id||
-            ''
-        )
-    );
-}
-
-function compactItem(a){
+function compact(a){
     return {
         source:'yummy',
 
@@ -544,53 +581,49 @@ function compactItem(a){
     };
 }
 
-function itemSame(a,b){
-    if(!a||!b){
-        return false;
-    }
-
-    if(
-        a.source==='yummy'&&
-        b.source==='yummy'
-    ){
-        return (
-            String(a.id)===
-            String(b.id)
-        );
-    }
-
+function same(a,b){
     return (
-        String(
-            a.id||
-            ''
-        )===
-        String(
-            b.id||
-            ''
-        )&&
-        clean(a.title)===
-        clean(b.title)
+        !!a&&
+        !!b&&
+        (
+            (
+                a.source==='yummy'&&
+                b.source==='yummy'&&
+                String(a.id)===
+                String(b.id)
+            )||
+            (
+                String(
+                    a.id||
+                    ''
+                )===
+                String(
+                    b.id||
+                    ''
+                )&&
+                clean(a.title)===
+                clean(b.title)
+            )
+        )
     );
 }
 
-function isFavorite(a){
+function isFav(a){
     return storedList(
         FAVORITES_KEY
     )
-    .some(function(x){
-        return itemSame(
-            x,
-            a
-        );
-    });
+    .some(
+        function(x){
+            return same(
+                x,
+                a
+            );
+        }
+    );
 }
 
-function toggleFavorite(a){
-    if(!a||!a.id){
-        return false;
-    }
-
-    var list=
+function toggleFav(a){
+    var l=
         storedList(
             FAVORITES_KEY
         );
@@ -598,23 +631,32 @@ function toggleFavorite(a){
     var found=false;
     var out=[];
 
-    list.forEach(function(x){
-
-        if(itemSame(x,a)){
-            found=true;
+    l.forEach(
+        function(x){
+            if(
+                same(
+                    x,
+                    a
+                )
+            ){
+                found=true;
+            }
+            else if(
+                out.length<
+                39
+            ){
+                out.push(x);
+            }
         }
-        else if(out.length<49){
-            out.push(x);
-        }
-    });
+    );
 
     if(!found){
         out.unshift(
-            compactItem(a)
+            compact(a)
         );
     }
 
-    setStoredList(
+    setStored(
         FAVORITES_KEY,
         out
     );
@@ -622,268 +664,275 @@ function toggleFavorite(a){
     return !found;
 }
 
-function saveRecent(a){
-    if(!a||!a.id){
+function recent(a){
+    if(
+        !a||
+        !a.id
+    ){
         return;
     }
 
-    var list=
-        storedList(
-            RECENT_KEY
-        );
-
     var out=[
-        compactItem(a)
+        compact(a)
     ];
 
-    list.forEach(function(x){
-
-        if(
-            out.length<24&&
-            !itemSame(x,a)
-        ){
-            out.push(x);
+    storedList(
+        RECENT_KEY
+    )
+    .forEach(
+        function(x){
+            if(
+                out.length<
+                18&&
+                !same(
+                    x,
+                    a
+                )
+            ){
+                out.push(x);
+            }
         }
-    });
+    );
 
-    setStoredList(
+    setStored(
         RECENT_KEY,
         out
     );
 }
 
 function watchStore(){
-    try{
-        var value=
-            Lampa.Storage.get(
-                WATCH_KEY,
-                {}
-            )||
-            {};
+    var v=
+        stored(
+            WATCH_KEY,
+            {}
+        );
 
-        return (
-            value&&
-            typeof value==='object'&&
-            !Array.isArray(value)
-        )
-            ?value
-            :{};
-    }
-    catch(e){
-        return {};
-    }
+    return (
+        v&&
+        typeof v==='object'&&
+        !Array.isArray(v)
+    )
+        ?v
+        :{};
 }
 
-function watchState(a){
+function watchKey(a){
+    return (
+        'y:'+
+        String(
+            a&&a.id||
+            ''
+        )
+    );
+}
+
+function watch(a){
     return (
         watchStore()[
-            animeStorageKey(a)
+            watchKey(a)
         ]||
         {}
     );
 }
 
-function saveWatchState(
+function saveWatch(
     a,
     patch
 ){
-    if(!a||!a.id){
+    if(
+        !a||
+        !a.id
+    ){
         return;
     }
 
     var store=
         watchStore();
 
-    var key=
-        animeStorageKey(a);
+    var k=
+        watchKey(a);
 
-    var state=
-        store[key]||
+    var v=
+        store[k]||
         {};
 
     Object.keys(
         patch||
         {}
     )
-    .forEach(function(k){
-        state[k]=patch[k];
-    });
+    .forEach(
+        function(x){
+            v[x]=
+                patch[x];
+        }
+    );
 
-    state.source='yummy';
-    state.anime=compactItem(a);
-    state.updatedAt=Date.now();
+    v.source=
+        'yummy';
 
-    store[key]=state;
+    v.anime=
+        compact(a);
 
-    try{
-        Lampa.Storage.set(
-            WATCH_KEY,
-            store
-        );
-    }
-    catch(e){}
+    v.updatedAt=
+        Date.now();
+
+    store[k]=v;
+
+    setStored(
+        WATCH_KEY,
+        store
+    );
 }
 
-function continueItems(){
-    var store=
+function continueStates(){
+    var s=
         watchStore();
 
-    return Object.keys(store)
-        .map(function(k){
-            return store[k];
-        })
-        .filter(function(x){
-            return (
-                x&&
-                x.source==='yummy'&&
-                x.anime&&
-                x.anime.id&&
-                num(
-                    x.episode,
-                    0
-                )>0
-            );
-        })
-        .sort(function(a,b){
-            return (
-                num(
-                    b.updatedAt,
-                    0
-                )-
-                num(
-                    a.updatedAt,
-                    0
-                )
-            );
-        })
+    return Object.keys(s)
+        .map(
+            function(k){
+                return s[k];
+            }
+        )
+        .filter(
+            function(x){
+                return (
+                    x&&
+                    x.source===
+                    'yummy'&&
+                    x.anime&&
+                    intv(
+                        x.episode
+                    )>0
+                );
+            }
+        )
+        .sort(
+            function(a,b){
+                return (
+                    num(
+                        b.updatedAt
+                    )-
+                    num(
+                        a.updatedAt
+                    )
+                );
+            }
+        )
         .slice(
             0,
-            18
+            7
         );
 }
 
+
 /* ============================================================
- * CSS
+ * STYLE
  * ============================================================ */
 
-function injectStyle(){
+function style(){
     if(
-        $('#animehub-v101-style')
+        $('#animehub-v110-style')
             .length
     ){
         return;
     }
 
     $('head').append(`
-<style id="animehub-v101-style">
+<style id="animehub-v110-style">
 :root{
-    --ah-bg:#070913;
-    --ah-panel:#111426;
-    --ah-text:#f8f7ff;
-    --ah-muted:#aaa8bc;
-    --ah-purple:#8d56ff;
-    --ah-pink:#e95ecf
+    --ah:#080a15;
+    --panel:#12162a;
+    --text:#faf8ff;
+    --muted:#aaa7bb;
+    --purple:#8c58f8;
+    --pink:#e65ed1
 }
 
 .ah-view{
     height:calc(100vh - 6.1em);
     overflow-y:auto;
     overflow-x:hidden;
-    box-sizing:border-box;
-    color:var(--ah-text);
-    background:
-        radial-gradient(circle at 76% -10%,rgba(132,78,255,.17),transparent 34%),
-        linear-gradient(180deg,#090b18,#060711 72%)
+    color:var(--text);
+    background:linear-gradient(180deg,#090c19,#060812 72%);
+    box-sizing:border-box
 }
 
 .ah-view::-webkit-scrollbar,
-.ah-track::-webkit-scrollbar,
-.ah-episode-track::-webkit-scrollbar,
-.ah-screens::-webkit-scrollbar{
+.ah-row::-webkit-scrollbar,
+.ah-eprow::-webkit-scrollbar,
+.ah-shots::-webkit-scrollbar{
     width:0;
     height:0
 }
 
 .ah-page{
-    padding:0 2.05em 5em;
+    padding:0 1.8em 4em;
     box-sizing:border-box;
     min-height:100%
 }
 
-.ah-topbar{
-    height:4.7em;
+.ah-top{
+    height:4.25em;
     display:flex;
     align-items:center;
-    gap:1.05em;
-    position:relative;
-    z-index:30
+    gap:.9em
 }
 
 .ah-brand{
     display:flex;
     align-items:center;
-    gap:.55em;
-    padding-right:1.15em;
-    border-right:1px solid rgba(255,255,255,.15);
-    white-space:nowrap;
-    font-size:1.5em;
-    font-weight:900
+    gap:.45em;
+    font-size:1.45em;
+    font-weight:900;
+    padding-right:1em;
+    border-right:1px solid rgba(255,255,255,.13)
 }
 
-.ah-brand-logo{
-    width:2em;
-    height:2em;
-    filter:drop-shadow(0 0 10px rgba(170,91,255,.35))
+.ah-logo{
+    width:1.9em;
+    height:1.9em
 }
 
-.ah-brand-name{
-    background:linear-gradient(90deg,#fff,#e389ff);
+.ah-name{
+    background:linear-gradient(90deg,#fff,#dc8cff);
     -webkit-background-clip:text;
     color:transparent
 }
 
 .ah-nav{
     display:flex;
-    align-items:center;
-    gap:.25em;
-    min-width:0;
-    overflow:hidden
+    gap:.18em
 }
 
 .ah-navbtn{
-    padding:.62em .84em;
-    border-radius:.68em;
-    color:#d5d2e1;
-    border:1px solid transparent;
+    padding:.55em .72em;
+    border-radius:.55em;
     white-space:nowrap
 }
 
 .ah-navbtn.active{
-    color:#fff;
-    background:rgba(129,75,238,.20)
+    background:rgba(131,75,235,.24)
 }
 
 .ah-navbtn.focus{
-    background:linear-gradient(135deg,#9864ff,#7648ec);
-    border-color:rgba(226,201,255,.55);
-    box-shadow:0 0 22px rgba(137,82,255,.28);
+    background:#8a56ec;
     color:#fff
 }
 
 .ah-hero{
+    height:39vh;
+    min-height:21em;
+    max-height:28em;
     position:relative;
-    height:44vh;
-    min-height:24em;
-    max-height:33em;
     overflow:hidden;
-    border-radius:1.05em;
-    margin-bottom:1.55em;
-    background:#111425;
-    isolation:isolate
+    border-radius:.85em;
+    margin-bottom:1.25em;
+    isolation:isolate;
+    background:#111629
 }
 
-.ah-hero-bg,
-.ah-detail-bg{
+.ah-bg{
     position:absolute;
     inset:0;
     width:100%;
@@ -892,36 +941,31 @@ function injectStyle(){
     z-index:-5
 }
 
-.ah-poster-bg{
-    filter:blur(17px) brightness(.62);
-    transform:scale(1.08)
-}
-
-.ah-hero-shade{
+.ah-shade{
     position:absolute;
     inset:0;
     z-index:-4;
     background:
         linear-gradient(
             90deg,
-            rgba(5,6,16,.995) 0%,
-            rgba(5,6,16,.96) 28%,
-            rgba(5,6,16,.77) 48%,
-            rgba(5,6,16,.32) 74%,
-            rgba(5,6,16,.09) 100%
+            rgba(4,6,15,.99) 0%,
+            rgba(4,6,15,.94) 30%,
+            rgba(4,6,15,.69) 53%,
+            rgba(4,6,15,.20) 78%,
+            rgba(4,6,15,.06) 100%
         ),
         linear-gradient(
             0deg,
-            rgba(5,6,16,.90),
-            rgba(5,6,16,.04) 58%
+            rgba(4,6,15,.85),
+            transparent 60%
         )
 }
 
-.ah-hero-content{
+.ah-hero-copy{
     position:absolute;
-    left:3.4%;
-    top:7%;
-    bottom:7%;
+    left:3.2%;
+    top:8%;
+    bottom:8%;
     width:53%;
     display:flex;
     flex-direction:column;
@@ -929,159 +973,143 @@ function injectStyle(){
 }
 
 .ah-kicker{
-    font-size:.74em;
-    font-weight:850;
-    letter-spacing:.12em;
+    color:#df8cff;
+    font-size:.72em;
+    font-weight:800;
+    letter-spacing:.09em;
     text-transform:uppercase;
-    color:#e497ff;
-    margin-bottom:.55em
+    margin-bottom:.5em
 }
 
-.ah-hero-title{
-    font-size:3.05em;
-    font-weight:920;
+.ah-title{
+    font-size:2.75em;
+    font-weight:900;
     line-height:1.02;
-    letter-spacing:-.035em;
-    text-shadow:
-        0 3px 8px rgba(0,0,0,.98),
-        0 14px 32px rgba(0,0,0,.75)
+    text-shadow:0 2px 6px #000
 }
 
-.ah-original-title{
-    color:#bdb9cb;
-    margin:.23em 0 .62em
+.ah-original{
+    color:#b9b5c6;
+    margin:.22em 0 .55em
 }
 
 .ah-meta{
     display:flex;
     flex-wrap:wrap;
-    align-items:center;
-    gap:.42em;
-    margin-bottom:.58em
+    gap:.38em;
+    margin:.35em 0
 }
 
 .ah-chip{
-    padding:.29em .60em;
+    font-size:.76em;
+    padding:.26em .52em;
     border-radius:999px;
-    font-size:.80em;
-    background:rgba(255,255,255,.09);
-    border:1px solid rgba(255,255,255,.13);
-    white-space:nowrap
+    background:rgba(255,255,255,.095);
+    border:1px solid rgba(255,255,255,.11)
 }
 
-.ah-chip.score{
-    color:#ffd768
+.ah-score{
+    color:#ffd76a
 }
 
-.ah-chip.hot{
-    color:#ff9fdc
-}
-
-.ah-hero-desc{
-    font-size:.97em;
-    line-height:1.53;
-    color:#f4f2fa;
+.ah-description{
+    font-size:.94em;
+    line-height:1.48;
+    color:#f5f3fa;
     max-width:46em;
-    margin:.65em 0 1.02em;
-    text-shadow:
-        0 2px 5px #000,
-        0 8px 24px rgba(0,0,0,.92)
+    margin:.55em 0 .9em;
+    text-shadow:0 2px 4px #000
 }
 
 .ah-actions{
     display:flex;
-    gap:.62em;
-    align-items:center
+    gap:.55em
 }
 
-.ah-action,
-.ah-pagebtn,
+.ah-button,
 .ah-filter,
-.ah-all-episodes{
-    padding:.70em 1.02em;
-    border-radius:.60em;
-    background:rgba(255,255,255,.105);
-    border:1px solid rgba(255,255,255,.14);
-    font-weight:760;
-    box-sizing:border-box
+.ah-pagebtn,
+.ah-all{
+    padding:.64em .9em;
+    border-radius:.55em;
+    background:rgba(255,255,255,.10);
+    border:1px solid rgba(255,255,255,.12);
+    font-weight:750
 }
 
-.ah-action.primary{
-    background:linear-gradient(135deg,#995fff,#7443e8 62%,#d54fd9)
+.ah-button.primary{
+    background:linear-gradient(
+        135deg,
+        #965cf8,
+        #7444e9 65%,
+        #d84fd6
+    )
 }
 
-.ah-action.focus,
-.ah-pagebtn.focus,
+.ah-button.focus,
 .ah-filter.focus,
-.ah-all-episodes.focus{
-    transform:scale(1.035);
+.ah-pagebtn.focus,
+.ah-all.focus{
     background:#fff;
     color:#090b14;
-    box-shadow:0 0 0 3px rgba(158,105,255,.34)
+    transform:scale(1.025)
 }
 
 .ah-shelf{
-    margin:0 0 1.45em
+    margin-bottom:1.15em
 }
 
 .ah-shelf-title,
 .ah-block-title,
-.ah-episodes-title{
-    font-size:1.34em;
+.ah-eptitle{
+    font-size:1.22em;
     font-weight:850;
-    margin:0 0 .62em
+    margin:0 0 .5em
 }
 
-.ah-track,
-.ah-screens,
-.ah-episode-track{
+.ah-row,
+.ah-eprow,
+.ah-shots{
     display:flex;
-    gap:.78em;
+    gap:.68em;
     overflow-x:auto;
     overflow-y:hidden;
-    padding:.35em .24em .78em
+    padding:.2em .15em .6em
 }
 
-.ah-wide-card{
+.ah-wide{
     position:relative;
-    flex:0 0 15.7em;
-    height:7.25em;
-    border-radius:.72em;
+    flex:0 0 14.3em;
+    height:6.55em;
+    border-radius:.62em;
     overflow:hidden;
-    background:#111426;
-    border:1px solid rgba(255,255,255,.08)
+    background:#111628;
+    border:1px solid rgba(255,255,255,.07)
 }
 
-.ah-wide-card img{
+.ah-wide img{
     position:absolute;
     inset:0;
     width:100%;
     height:100%;
-    object-fit:cover;
-    opacity:.86
+    object-fit:cover
 }
 
-.ah-wide-shade{
+.ah-cardshade{
     position:absolute;
     inset:0;
-    background:
-        linear-gradient(
-            0deg,
-            rgba(5,7,17,.99),
-            rgba(5,7,17,.18) 78%
-        ),
-        linear-gradient(
-            90deg,
-            rgba(5,7,17,.38),
-            transparent
-        )
+    background:linear-gradient(
+        0deg,
+        rgba(5,7,16,.98),
+        rgba(5,7,16,.08) 80%
+    )
 }
 
 .ah-wide-copy{
     position:absolute;
-    left:.68em;
-    right:.68em;
-    bottom:.55em
+    left:.55em;
+    right:.55em;
+    bottom:.45em
 }
 
 .ah-wide-title{
@@ -1091,620 +1119,484 @@ function injectStyle(){
     text-overflow:ellipsis
 }
 
-.ah-wide-meta{
-    font-size:.69em;
-    color:#d1cedc;
-    display:flex;
-    gap:.48em;
-    white-space:nowrap;
-    overflow:hidden
-}
-
-.ah-wide-badge{
-    position:absolute;
-    left:.5em;
-    top:.48em;
-    padding:.24em .44em;
-    border-radius:.40em;
-    background:rgba(121,70,240,.91);
-    font-size:.64em;
-    font-weight:850
-}
-
-.ah-wide-progress{
-    position:absolute;
-    left:.62em;
-    right:.62em;
-    bottom:.18em;
-    height:.18em;
-    background:rgba(255,255,255,.13);
-    border-radius:99px;
-    overflow:hidden
-}
-
-.ah-wide-progress span{
-    display:block;
-    height:100%;
-    background:linear-gradient(90deg,#9560ff,#ed60cf)
-}
-
-.ah-wide-card.focus,
-.ah-poster-card.focus,
-.ah-episode-card.focus,
-.ah-schedule-card.focus{
-    transform:scale(1.052);
-    border-color:#dcb8ff;
-    box-shadow:
-        0 0 0 3px rgba(146,87,255,.23),
-        0 16px 38px rgba(0,0,0,.44);
-    z-index:5
-}
-
-.ah-section-head{
-    padding:.62em 0 1em
-}
-
-.ah-page-title{
-    font-size:2.05em;
-    font-weight:920
-}
-
-.ah-page-sub{
-    color:#9795aa;
-    margin-top:.22em
-}
-
-.ah-catalog-layout{
-    display:flex;
-    align-items:flex-start;
-    gap:1.25em
-}
-
-.ah-filter-sidebar{
-    width:12.2em;
-    min-width:12.2em;
-    position:sticky;
-    top:.4em;
-    padding:.65em;
-    border-radius:.85em;
-    background:rgba(12,15,30,.68);
-    border:1px solid rgba(255,255,255,.07)
-}
-
-.ah-filter{
-    margin:.22em 0;
-    width:100%;
-    font-size:.85em
-}
-
-.ah-filter.selected{
-    background:rgba(133,79,245,.34);
-    border-color:rgba(192,156,255,.32)
-}
-
-.ah-catalog-main{
-    flex:1;
-    min-width:0
-}
-
-.ah-grid{
-    display:flex;
-    flex-wrap:wrap;
-    gap:.85em
-}
-
-.ah-poster-card{
-    flex:0 0 9.95em;
-    width:9.95em;
-    padding:.27em;
-    border-radius:.76em;
-    box-sizing:border-box
-}
-
-.ah-poster-media{
-    position:relative;
-    height:14.15em;
-    border-radius:.62em;
-    overflow:hidden;
-    background:#13162a
-}
-
-.ah-poster-media img,
-.ah-detail-poster img,
-.ah-screen img{
-    width:100%;
-    height:100%;
-    object-fit:cover
-}
-
-.ah-poster-score{
-    position:absolute;
-    right:.45em;
-    bottom:.45em;
-    padding:.25em .43em;
-    border-radius:.4em;
-    background:rgba(7,8,18,.9);
-    color:#ffd76a;
-    font-size:.72em
-}
-
-.ah-poster-status{
-    position:absolute;
-    left:.45em;
-    top:.45em;
-    padding:.24em .42em;
-    border-radius:.4em;
-    background:rgba(111,65,226,.90);
-    font-size:.63em;
-    font-weight:800
-}
-
-.ah-poster-title{
-    font-size:.84em;
-    font-weight:740;
-    height:2.28em;
-    overflow:hidden;
-    margin:.50em .06em .15em
-}
-
-.ah-poster-meta{
-    font-size:.66em;
-    color:#8f8ca2;
+.ah-smallmeta{
+    font-size:.65em;
+    color:#c9c6d3;
     white-space:nowrap;
     overflow:hidden;
     text-overflow:ellipsis
 }
 
+.ah-badge{
+    position:absolute;
+    left:.42em;
+    top:.38em;
+    font-size:.60em;
+    font-weight:850;
+    padding:.2em .38em;
+    border-radius:.35em;
+    background:#7d49e9
+}
+
+.ah-progress{
+    position:absolute;
+    left:0;
+    right:0;
+    bottom:0;
+    height:.18em;
+    background:rgba(255,255,255,.11)
+}
+
+.ah-progress span{
+    display:block;
+    height:100%;
+    background:linear-gradient(90deg,#8d59ff,#e85fd0)
+}
+
+.ah-wide.focus,
+.ah-poster.focus,
+.ah-ep.focus,
+.ah-sch.focus{
+    border-color:#dab8ff;
+    outline:2px solid rgba(158,100,255,.36);
+    transform:scale(1.03);
+    z-index:4
+}
+
+.ah-head{
+    padding:.45em 0 .85em
+}
+
+.ah-page-title{
+    font-size:1.9em;
+    font-weight:900
+}
+
+.ah-page-sub{
+    color:#9996aa;
+    font-size:.82em
+}
+
+.ah-catalog{
+    display:flex;
+    gap:1em;
+    align-items:flex-start
+}
+
+.ah-side{
+    width:10.5em;
+    min-width:10.5em;
+    padding:.5em;
+    border-radius:.7em;
+    background:#0e1222
+}
+
+.ah-filter{
+    width:100%;
+    margin:.17em 0;
+    font-size:.80em
+}
+
+.ah-filter.selected{
+    background:rgba(132,79,239,.34)
+}
+
+.ah-main{
+    flex:1;
+    min-width:0
+}
+
+.ah-grid{
+    display:grid;
+    grid-template-columns:repeat(6,minmax(0,1fr));
+    gap:.7em
+}
+
+.ah-poster{
+    min-width:0;
+    padding:.2em;
+    border-radius:.64em
+}
+
+.ah-poster-media{
+    height:12.5em;
+    position:relative;
+    border-radius:.52em;
+    overflow:hidden;
+    background:#14182a
+}
+
+.ah-poster-media img,
+.ah-detail-poster img,
+.ah-shot img{
+    width:100%;
+    height:100%;
+    object-fit:cover
+}
+
+.ah-poster-title{
+    font-size:.78em;
+    font-weight:730;
+    height:2.15em;
+    overflow:hidden;
+    margin:.42em .02em .10em
+}
+
+.ah-poster-meta{
+    font-size:.62em;
+    color:#8f8ca1;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis
+}
+
+.ah-poster-score{
+    position:absolute;
+    right:.35em;
+    bottom:.35em;
+    font-size:.65em;
+    padding:.18em .32em;
+    background:rgba(5,7,15,.88);
+    border-radius:.32em;
+    color:#ffd76a
+}
+
 .ah-pages{
     display:flex;
-    gap:.65em;
-    margin-top:1.25em
+    gap:.55em;
+    margin-top:1em
 }
 
-.ah-detail-hero{
+.ah-detail{
     position:relative;
-    min-height:31em;
-    border-radius:1.05em;
+    min-height:28em;
+    border-radius:.85em;
     overflow:hidden;
-    margin-bottom:1.12em;
     isolation:isolate;
-    background:#0a0d1b
+    background:#0d1120;
+    margin-bottom:1em
 }
 
-.ah-detail-bg{
-    filter:brightness(.80) saturate(1.06)
-}
-
-.ah-detail-shade{
-    position:absolute;
-    inset:0;
-    z-index:-4;
-    background:
-        linear-gradient(
-            90deg,
-            rgba(4,6,16,.995) 0%,
-            rgba(4,6,16,.96) 29%,
-            rgba(4,6,16,.79) 52%,
-            rgba(4,6,16,.40) 78%,
-            rgba(4,6,16,.20) 100%
-        ),
-        linear-gradient(
-            0deg,
-            rgba(4,6,16,.96),
-            rgba(4,6,16,.10) 68%
-        )
-}
-
-.ah-detail-content{
+.ah-detail-copywrap{
     display:flex;
-    gap:1.25em;
-    padding:1.55em;
+    gap:1em;
+    padding:1.25em;
     align-items:center;
-    min-height:30em;
+    min-height:27em;
     box-sizing:border-box
 }
 
 .ah-detail-poster{
-    width:12.8em;
-    min-width:12.8em;
-    height:18.9em;
-    border-radius:.82em;
+    width:11.2em;
+    min-width:11.2em;
+    height:16.6em;
+    border-radius:.65em;
     overflow:hidden;
-    background:#15182a;
-    border:1px solid rgba(225,202,255,.26);
-    box-shadow:0 18px 42px rgba(0,0,0,.38)
+    background:#15192b;
+    border:1px solid rgba(255,255,255,.13)
 }
 
-.ah-detail-copy{
+.ah-detail-main{
     flex:1;
     min-width:0;
-    padding:.9em 1.05em;
-    border-radius:.8em;
-    background:
-        linear-gradient(
-            90deg,
-            rgba(4,6,16,.70),
-            rgba(4,6,16,.34) 72%,
-            rgba(4,6,16,.08)
-        );
-    border-left:1px solid rgba(255,255,255,.055)
+    padding:.75em .85em;
+    border-radius:.65em;
+    background:linear-gradient(
+        90deg,
+        rgba(4,6,15,.70),
+        rgba(4,6,15,.25),
+        transparent
+    )
 }
 
 .ah-detail-title{
-    font-size:2.65em;
-    font-weight:920;
-    line-height:1.04;
-    letter-spacing:-.03em;
-    text-shadow:
-        0 3px 8px rgba(0,0,0,.98),
-        0 12px 28px rgba(0,0,0,.78)
+    font-size:2.25em;
+    font-weight:900;
+    line-height:1.05;
+    text-shadow:0 2px 6px #000
 }
 
-.ah-detail-desc{
-    font-size:.95em;
-    line-height:1.55;
-    color:#f4f2fa;
-    max-width:50em;
-    margin:.72em 0 1em;
-    text-shadow:
-        0 2px 5px #000,
-        0 8px 22px rgba(0,0,0,.96)
+.ah-aside{
+    width:15.2em;
+    min-width:15.2em;
+    background:rgba(9,12,25,.82);
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:.7em;
+    padding:.75em
 }
 
-.ah-detail-aside{
-    width:17.2em;
-    min-width:17.2em;
-    padding:.9em 1em;
-    border-radius:.84em;
-    background:rgba(10,14,30,.86);
-    border:1px solid rgba(187,154,255,.22)
-}
-
-.ah-detail-aside-title{
+.ah-aside-title{
     font-weight:850;
-    font-size:1.03em;
-    margin-bottom:.32em
+    margin-bottom:.2em
 }
 
-.ah-info-row{
+.ah-info{
     display:flex;
     justify-content:space-between;
-    gap:.7em;
-    padding:.58em 0;
-    border-bottom:1px solid rgba(255,255,255,.075);
-    font-size:.80em
+    gap:.5em;
+    font-size:.76em;
+    padding:.46em 0;
+    border-bottom:1px solid rgba(255,255,255,.06)
 }
 
-.ah-info-label{
+.ah-info span:first-child{
     color:#aaa7b8
 }
 
-.ah-info-value{
-    font-weight:740;
+.ah-info span:last-child{
     text-align:right;
+    font-weight:700;
     max-width:62%
 }
 
 .ah-studio{
-    color:#cfccda;
-    font-size:.82em;
-    margin:.24em 0 .5em
+    font-size:.78em;
+    color:#cbc7d5;
+    margin:.15em 0
 }
 
-.ah-description-panel{
-    padding:1em;
-    border-radius:.78em;
-    background:rgba(16,19,37,.70);
-    border:1px solid rgba(255,255,255,.065);
-    color:#d5d2df;
-    line-height:1.55;
-    margin-bottom:1.3em
+.ah-longdesc{
+    background:#101426;
+    border:1px solid rgba(255,255,255,.06);
+    border-radius:.65em;
+    padding:.85em;
+    line-height:1.5;
+    color:#d5d2de;
+    margin-bottom:1em
 }
 
-.ah-episodes-section{
-    margin-bottom:1.42em
-}
-
-.ah-episodes-head{
+.ah-ephead{
     display:flex;
-    align-items:center;
     justify-content:space-between;
-    gap:1em;
-    margin-bottom:.6em
-}
-
-.ah-episodes-title-wrap{
-    display:flex;
     align-items:center;
-    gap:.65em
+    margin-bottom:.45em
 }
 
-.ah-episodes-count{
-    padding:.26em .57em;
-    border-radius:999px;
-    font-size:.73em;
-    color:#d8d4e3;
-    background:rgba(255,255,255,.07)
+.ah-epcount{
+    font-size:.7em;
+    color:#bbb7c8;
+    background:rgba(255,255,255,.07);
+    padding:.2em .45em;
+    border-radius:99px;
+    margin-left:.5em
 }
 
-.ah-all-episodes{
-    font-size:.80em
-}
-
-.ah-episode-card{
+.ah-ep{
     position:relative;
-    flex:0 0 11em;
-    height:6.45em;
-    border-radius:.7em;
+    flex:0 0 10.2em;
+    height:5.85em;
+    border-radius:.6em;
     overflow:hidden;
-    background:#121529;
-    border:1px solid rgba(255,255,255,.09)
+    background:#13172a;
+    border:1px solid rgba(255,255,255,.08)
 }
 
-.ah-episode-card img{
+.ah-ep img{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover
+}
+
+.ah-epnum{
+    position:absolute;
+    left:.4em;
+    top:.35em;
+    font-size:.7em;
+    font-weight:850;
+    background:rgba(5,7,16,.88);
+    padding:.2em .34em;
+    border-radius:.3em
+}
+
+.ah-epcopy{
+    position:absolute;
+    left:.45em;
+    right:.45em;
+    bottom:.38em
+}
+
+.ah-epname{
+    font-size:.7em;
+    font-weight:760
+}
+
+.ah-epmeta{
+    font-size:.58em;
+    color:#c6c2d0;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis
+}
+
+.ah-placeholder{
+    padding:.8em;
+    border-radius:.65em;
+    background:#101426;
+    color:#bbb7c8;
+    display:flex;
+    gap:.55em;
+    align-items:center
+}
+
+.ah-spinner{
+    width:1.1em;
+    height:1.1em;
+    border-radius:50%;
+    border:2px solid rgba(187,125,255,.15);
+    border-top-color:#c878ff;
+    animation:spin .9s linear infinite
+}
+
+.ah-shot{
+    flex:0 0 15.5em;
+    height:8.7em;
+    border-radius:.6em;
+    overflow:hidden;
+    background:#14182a
+}
+
+.ah-schgrid{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:.7em
+}
+
+.ah-sch{
+    height:6.2em;
+    position:relative;
+    border-radius:.6em;
+    overflow:hidden;
+    background:#14182a;
+    border:1px solid rgba(255,255,255,.07)
+}
+
+.ah-sch img{
     position:absolute;
     inset:0;
     width:100%;
     height:100%;
     object-fit:cover;
-    opacity:.76
+    opacity:.72
 }
 
-.ah-episode-shade{
+.ah-schcopy{
+    position:absolute;
+    left:.5em;
+    right:.5em;
+    bottom:.42em;
+    z-index:2
+}
+
+.ah-sch:after{
+    content:'';
     position:absolute;
     inset:0;
-    background:
-        linear-gradient(
-            0deg,
-            rgba(5,7,17,.99),
-            rgba(5,7,17,.16) 75%
-        )
+    background:linear-gradient(
+        0deg,
+        rgba(5,7,16,.98),
+        rgba(5,7,16,.08)
+    )
 }
 
-.ah-episode-number{
-    position:absolute;
-    left:.45em;
-    top:.42em;
-    padding:.25em .43em;
-    border-radius:.42em;
-    background:rgba(8,10,23,.88);
-    font-weight:850;
-    font-size:.78em
-}
-
-.ah-episode-copy{
-    position:absolute;
-    left:.52em;
-    right:.52em;
-    bottom:.45em
-}
-
-.ah-episode-name{
-    font-size:.75em;
+.ah-schtitle{
+    font-size:.76em;
     font-weight:760;
     white-space:nowrap;
     overflow:hidden;
     text-overflow:ellipsis
 }
 
-.ah-episode-meta{
-    font-size:.63em;
-    color:#c4c0d0;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis
-}
-
-.ah-episode-progress{
-    position:absolute;
-    left:0;
-    right:0;
-    bottom:0;
-    height:.20em;
-    background:rgba(255,255,255,.10)
-}
-
-.ah-episode-progress span{
-    display:block;
-    height:100%;
-    background:linear-gradient(90deg,#8d56ff,#ed60cf)
-}
-
-.ah-episode-card.current{
-    border-color:rgba(218,183,255,.86)
-}
-
-.ah-placeholder{
-    display:flex;
-    align-items:center;
-    gap:.75em;
-    min-height:4.6em;
-    padding:.9em;
-    border-radius:.75em;
-    background:rgba(15,18,35,.68);
-    border:1px solid rgba(255,255,255,.065);
-    color:#c4c1d1
-}
-
-.ah-mini-spinner{
-    width:1.35em;
-    height:1.35em;
-    border-radius:50%;
-    border:2px solid rgba(190,145,255,.14);
-    border-top-color:#c87aff;
-    animation:ah-spin 1s linear infinite
-}
-
-.ah-screen{
-    flex:0 0 17.6em;
-    height:9.9em;
-    border-radius:.68em;
-    overflow:hidden;
-    background:#121529
-}
-
-.ah-schedule-day{
-    margin-bottom:1.4em
-}
-
-.ah-schedule-day-title{
-    font-size:1.15em;
-    font-weight:850;
-    margin-bottom:.58em;
-    color:#eeeaf7
-}
-
-.ah-schedule-grid{
-    display:flex;
-    flex-wrap:wrap;
-    gap:.75em
-}
-
-.ah-schedule-card{
-    position:relative;
-    width:14.7em;
-    height:6.8em;
-    border-radius:.68em;
-    overflow:hidden;
-    background:#121529;
-    border:1px solid rgba(255,255,255,.08)
-}
-
-.ah-schedule-card img{
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    object-fit:cover;
-    opacity:.64
-}
-
-.ah-schedule-card:after{
-    content:'';
-    position:absolute;
-    inset:0;
-    background:
-        linear-gradient(
-            0deg,
-            rgba(5,7,16,.98),
-            rgba(5,7,16,.28)
-        )
-}
-
-.ah-schedule-copy{
-    position:absolute;
-    z-index:2;
-    left:.62em;
-    right:.62em;
-    bottom:.5em
-}
-
-.ah-schedule-title{
-    font-size:.83em;
-    font-weight:780;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis
-}
-
-.ah-schedule-meta{
-    font-size:.66em;
-    color:#c9c5d5;
-    margin-top:.15em
-}
-
 .ah-empty{
-    padding:2em 0;
-    color:#aaa7ba
+    padding:1.5em;
+    color:#aaa7bb
 }
 
 .ah-fallback{
+    width:100%;
+    height:100%;
     display:flex;
     align-items:center;
     justify-content:center;
-    width:100%;
-    height:100%;
-    background:#14172a;
-    color:#858397;
     text-align:center;
-    padding:.5em;
+    background:#15192b;
+    color:#89869b;
+    font-size:.75em;
+    padding:.4em;
     box-sizing:border-box
 }
 
 .ah-loader{
-    min-height:24em;
-    position:relative;
+    min-height:20em;
     display:flex;
+    position:relative;
     flex-direction:column;
-    align-items:center;
     justify-content:center;
-    gap:.9em
+    align-items:center;
+    gap:.7em;
+    color:#bbb7c8
 }
 
-.ah-loader-torii{
-    width:5.3em;
-    height:5.3em;
-    filter:drop-shadow(0 0 18px rgba(174,92,255,.34))
+.ah-loader-logo{
+    width:4.5em;
+    height:4.5em
 }
 
-.ah-loader-orbit{
+.ah-loader-ring{
     position:absolute;
-    width:7em;
-    height:7em;
+    width:5.8em;
+    height:5.8em;
+    border:2px solid rgba(180,110,255,.12);
+    border-top-color:#cc76ff;
     border-radius:50%;
-    border:3px solid rgba(174,103,255,.10);
-    border-top-color:#d36dff;
-    animation:ah-spin 1.15s linear infinite
+    animation:spin 1s linear infinite
 }
 
-.ah-loader-text{
-    color:#bdb8ca
-}
-
-@keyframes ah-spin{
+@keyframes spin{
     to{
         transform:rotate(360deg)
     }
 }
 
 @media(max-width:1250px){
-    .ah-detail-aside{
+    .ah-grid{
+        grid-template-columns:repeat(5,minmax(0,1fr))
+    }
+
+    .ah-aside{
         display:none
     }
 
-    .ah-detail-poster{
-        width:11.6em;
-        min-width:11.6em;
-        height:17.2em
-    }
-
     .ah-detail-title{
-        font-size:2.35em
+        font-size:2em
     }
 
-    .ah-filter-sidebar{
-        width:10.8em;
-        min-width:10.8em
+    .ah-side{
+        width:9.6em;
+        min-width:9.6em
     }
 }
 </style>
     `);
 }
 
+
 /* ============================================================
- * IMAGE
+ * IMAGES
  * ============================================================ */
 
 function putImage(
     box,
     url,
-    text
+    title,
+    eager
 ){
     if(!url){
         box.append(
             '<div class="ah-fallback">'+
                 esc(
-                    text||
+                    title||
                     'AnimeHub'
                 )+
             '</div>'
@@ -1717,20 +1609,25 @@ function putImage(
         $('<img alt="">')
         .attr({
             src:url,
-            loading:'lazy',
             decoding:'async'
         });
+
+    if(!eager){
+        img.attr(
+            'loading',
+            'lazy'
+        );
+    }
 
     img.on(
         'error',
         function(){
-
             box
                 .empty()
                 .append(
                     '<div class="ah-fallback">'+
                         esc(
-                            text||
+                            title||
                             'AnimeHub'
                         )+
                     '</div>'
@@ -1741,109 +1638,134 @@ function putImage(
     box.append(img);
 }
 
+function putBackground(
+    box,
+    url
+){
+    if(!url){
+        return;
+    }
+
+    var img=
+        $('<img class="ah-bg" alt="">')
+        .attr({
+            src:url,
+            decoding:'async'
+        });
+
+    img.on(
+        'error',
+        function(){
+            $(this)
+                .remove();
+        }
+    );
+
+    box.append(img);
+}
+
+
 /* ============================================================
  * NAVIGATION
  * ============================================================ */
 
-function visibleSelectors(root){
+function selectors(root){
     return root
         .find('.selector')
         .toArray()
-        .filter(function(x){
-            return (
-                x&&
-                x.offsetParent!==null
-            );
-        });
+        .filter(
+            function(x){
+                return (
+                    x&&
+                    x.offsetParent!==null
+                );
+            }
+        );
 }
 
-function ensureVisible(
+function reveal(
     view,
-    element
+    el
 ){
     if(
         !view||
         !view[0]||
-        !element
+        !el
     ){
         return;
     }
 
-    var container=
+    var c=
         view[0];
 
-    var er=
-        element.getBoundingClientRect();
+    var r=
+        el.getBoundingClientRect();
 
-    var vr=
-        container.getBoundingClientRect();
+    var v=
+        c.getBoundingClientRect();
 
     if(
-        er.bottom>
-        vr.bottom-
-        30
+        r.bottom>
+        v.bottom-
+        20
     ){
-        container.scrollTop+=
-            er.bottom-
-            (
-                vr.bottom-
-                30
-            );
+        c.scrollTop+=
+            r.bottom-
+            v.bottom+
+            20;
     }
     else if(
-        er.top<
-        vr.top+
-        15
+        r.top<
+        v.top+
+        10
     ){
-        container.scrollTop-=
-            vr.top+
-            15-
-            er.top;
+        c.scrollTop-=
+            v.top+
+            10-
+            r.top;
     }
 
     var p=
-        element.parentElement;
+        el.parentElement;
 
     while(
         p&&
-        p!==container
+        p!==c
     ){
-        var style=
+        var st=
             window.getComputedStyle
                 ?window.getComputedStyle(p)
                 :null;
 
         if(
-            style&&
+            st&&
             (
-                style.overflowX==='auto'||
-                style.overflowX==='scroll'
+                st.overflowX==='auto'||
+                st.overflowX==='scroll'
             )
         ){
             var pr=
                 p.getBoundingClientRect();
 
             if(
-                er.right>
+                r.right>
                 pr.right-
-                18
+                12
             ){
                 p.scrollLeft+=
-                    er.right-
-                    (
-                        pr.right-
-                        18
-                    );
+                    r.right-
+                    pr.right+
+                    12;
             }
             else if(
-                er.left<
+                r.left<
                 pr.left+
-                18
+                12
             ){
                 p.scrollLeft-=
                     pr.left+
-                    18-
-                    er.left;
+                    12-
+                    r.left;
             }
 
             break;
@@ -1854,7 +1776,7 @@ function ensureVisible(
     }
 }
 
-function makeNav(
+function navFor(
     root,
     view,
     leftEdge,
@@ -1884,29 +1806,29 @@ function makeNav(
             catch(x){}
         }
 
-        ensureVisible(
+        reveal(
             view,
             el
         );
     }
 
-    function move(direction){
+    function move(dir){
         var all=
-            visibleSelectors(root);
+            selectors(root);
 
-        var current=
+        var cur=
             last||
             root.find(
                 '.selector.focus'
             )[0]||
             all[0];
 
-        if(!current){
+        if(!cur){
             return;
         }
 
         var cr=
-            current.getBoundingClientRect();
+            cur.getBoundingClientRect();
 
         var cx=
             cr.left+
@@ -1921,99 +1843,94 @@ function makeNav(
         var best=null;
         var bestScore=1e9;
 
-        all.forEach(function(x){
+        all.forEach(
+            function(x){
+                if(x===cur){
+                    return;
+                }
 
-            if(x===current){
-                return;
+                var r=
+                    x.getBoundingClientRect();
+
+                var dx=
+                    r.left+
+                    r.width/
+                    2-
+                    cx;
+
+                var dy=
+                    r.top+
+                    r.height/
+                    2-
+                    cy;
+
+                if(
+                    dir==='left'&&
+                    dx>=-3
+                ){
+                    return;
+                }
+
+                if(
+                    dir==='right'&&
+                    dx<=3
+                ){
+                    return;
+                }
+
+                if(
+                    dir==='up'&&
+                    dy>=-3
+                ){
+                    return;
+                }
+
+                if(
+                    dir==='down'&&
+                    dy<=3
+                ){
+                    return;
+                }
+
+                var main=
+                    (
+                        dir==='left'||
+                        dir==='right'
+                    )
+                        ?Math.abs(dx)
+                        :Math.abs(dy);
+
+                var cross=
+                    (
+                        dir==='left'||
+                        dir==='right'
+                    )
+                        ?Math.abs(dy)
+                        :Math.abs(dx);
+
+                var sc=
+                    main+
+                    cross*
+                    2;
+
+                if(sc<bestScore){
+                    bestScore=sc;
+                    best=x;
+                }
             }
-
-            var r=
-                x.getBoundingClientRect();
-
-            var xx=
-                r.left+
-                r.width/
-                2;
-
-            var yy=
-                r.top+
-                r.height/
-                2;
-
-            var dx=
-                xx-
-                cx;
-
-            var dy=
-                yy-
-                cy;
-
-            if(
-                direction==='left'&&
-                dx>=-4
-            ){
-                return;
-            }
-
-            if(
-                direction==='right'&&
-                dx<=4
-            ){
-                return;
-            }
-
-            if(
-                direction==='up'&&
-                dy>=-4
-            ){
-                return;
-            }
-
-            if(
-                direction==='down'&&
-                dy<=4
-            ){
-                return;
-            }
-
-            var main=
-                (
-                    direction==='left'||
-                    direction==='right'
-                )
-                    ?Math.abs(dx)
-                    :Math.abs(dy);
-
-            var cross=
-                (
-                    direction==='left'||
-                    direction==='right'
-                )
-                    ?Math.abs(dy)
-                    :Math.abs(dx);
-
-            var score=
-                main+
-                cross*
-                2.25;
-
-            if(score<bestScore){
-                bestScore=score;
-                best=x;
-            }
-        });
+        );
 
         if(best){
             focus(best);
         }
         else if(
-            direction==='left'&&
+            dir==='left'&&
             leftEdge
         ){
             leftEdge();
         }
         else if(
-            direction==='up'&&
+            dir==='up'&&
             upEdge
         ){
             upEdge();
@@ -2035,7 +1952,7 @@ function makeNav(
             function(){
                 last=this;
 
-                ensureVisible(
+                reveal(
                     view,
                     this
                 );
@@ -2054,7 +1971,7 @@ function makeNav(
     };
 }
 
-function installController(
+function controller(
     view,
     root,
     nav,
@@ -2120,8 +2037,9 @@ function installController(
     );
 }
 
+
 /* ============================================================
- * APP ROUTES
+ * ROUTES / MENU BAR
  * ============================================================ */
 
 function openHome(){
@@ -2144,10 +2062,22 @@ function openCatalog(
         title:title||'Каталог',
         component:CATALOG,
         page:1,
-        ah_mode:mode||'all',
-        ah_value:value||'',
-        ah_title:title||'Каталог',
-        ah_page:page||1
+
+        ah_mode:
+            mode||
+            'all',
+
+        ah_value:
+            value||
+            '',
+
+        ah_title:
+            title||
+            'Каталог',
+
+        ah_page:
+            page||
+            1
     });
 }
 
@@ -2191,7 +2121,7 @@ function openSearch(){
             nosave:true
         },
 
-        function(result){
+        function(r){
             try{
                 Lampa.Controller.toggle(
                     'content'
@@ -2199,20 +2129,20 @@ function openSearch(){
             }
             catch(e){}
 
-            var query=
+            var q=
                 clean(
-                    result&&
-                    typeof result==='object'
-                        ?result.value
-                        :result
+                    r&&
+                    typeof r==='object'
+                        ?r.value
+                        :r
                 );
 
-            if(query){
+            if(q){
                 openCatalog(
                     'search',
-                    query,
+                    q,
                     'Поиск: '+
-                    query,
+                    q,
                     1
                 );
             }
@@ -2220,10 +2150,11 @@ function openSearch(){
     );
 }
 
-function showSelect(
+function selectBox(
     title,
     items,
-    onSelect
+    onSelect,
+    onBack
 ){
     if(
         !items||
@@ -2236,80 +2167,27 @@ function showSelect(
         return false;
     }
 
+    var settled=false;
+
     Lampa.Select.show({
         title:title,
         items:items,
 
-        onSelect:
-            onSelect,
-
-        onBack:function(){
-            try{
-                Lampa.Controller.toggle(
-                    'content'
-                );
-            }
-            catch(e){}
-        }
-    });
-
-    return true;
-}
-
-/* Reliable nested Select chain.
-   Some Lampa builds call onBack after a selection. */
-
-function showPlaybackSelect(params){
-    if(
-        !Lampa.Select||
-        !Lampa.Select.show
-    ){
-        notify(
-            'Выбор источника недоступен'
-        );
-
-        try{
-            Lampa.Controller.toggle(
-                'content'
-            );
-        }
-        catch(e){}
-
-        return false;
-    }
-
-    params=
-        $.extend(
-            {},
-            params||
-            {}
-        );
-
-    var settled=false;
-
-    var originalSelect=
-        params.onSelect;
-
-    var originalBack=
-        params.onBack;
-
-    params.onSelect=
-        function(item){
+        onSelect:function(x){
             settled=true;
 
-            if(originalSelect){
-                originalSelect(item);
+            if(onSelect){
+                onSelect(x);
             }
-        };
+        },
 
-    params.onBack=
-        function(){
+        onBack:function(){
             if(settled){
                 return;
             }
 
-            if(originalBack){
-                originalBack();
+            if(onBack){
+                onBack();
             }
             else{
                 try{
@@ -2319,23 +2197,15 @@ function showPlaybackSelect(params){
                 }
                 catch(e){}
             }
-        };
-
-    Lampa.Select.show(params);
+        }
+    });
 
     return true;
 }
 
-function chainSelect(fn){
-    setTimeout(
-        fn,
-        0
-    );
-}
-
-function loadGenres(callback){
+function loadGenres(cb){
     if(genresCache){
-        callback(
+        cb(
             genresCache
         );
 
@@ -2353,12 +2223,12 @@ function loadGenres(callback){
             'genres'
         ),
 
-        function(data){
+        function(d){
             genresCache=
-                data.genres||
+                d.genres||
                 [];
 
-            callback(
+            cb(
                 genresCache
             );
 
@@ -2378,16 +2248,15 @@ function loadGenres(callback){
 
 function chooseGenre(){
     loadGenres(
-        function(genres){
-
-            showSelect(
+        function(g){
+            selectBox(
                 'Жанры',
 
-                genres.map(
-                    function(g){
+                g.map(
+                    function(x){
                         return {
-                            title:g.title,
-                            id:g.id
+                            title:x.title,
+                            id:x.id
                         };
                     }
                 ),
@@ -2406,26 +2275,27 @@ function chooseGenre(){
 }
 
 function chooseYear(){
-    var now=
-        new Date()
-            .getFullYear();
+    var a=[];
 
-    var items=[];
+    var y=
+        new Date()
+            .getFullYear()+
+        1;
 
     for(
-        var y=now+1;
+        ;
         y>=1970;
         y--
     ){
-        items.push({
+        a.push({
             title:String(y),
             value:String(y)
         });
     }
 
-    showSelect(
+    selectBox(
         'Год',
-        items,
+        a,
 
         function(x){
             openCatalog(
@@ -2439,20 +2309,17 @@ function chooseYear(){
 }
 
 function chooseType(){
-    var types=[
-        ['TV-сериалы','tv'],
-        ['Фильмы','movie'],
-        ['OVA','ova'],
-        ['ONA','ona'],
-        ['Спецвыпуски','special'],
-        ['Короткие TV','shorttv'],
-        ['Короткометражки','shortfilm']
-    ];
-
-    showSelect(
+    selectBox(
         'Тип',
 
-        types.map(
+        [
+            ['TV-сериалы','tv'],
+            ['Фильмы','movie'],
+            ['OVA','ova'],
+            ['ONA','ona'],
+            ['Спецвыпуски','special']
+        ]
+        .map(
             function(x){
                 return {
                     title:x[0],
@@ -2474,19 +2341,19 @@ function chooseType(){
 
 function topbar(
     active,
-    homeNoop
+    homeAction
 ){
     var bar=
-        $('<div class="ah-topbar"></div>');
+        $('<div class="ah-top"></div>');
 
     var brand=
         $('<div class="ah-brand"></div>')
         .append(
-            toriiSvg(
-                'ah-brand-logo'
+            torii(
+                'ah-logo'
             ),
 
-            '<span class="ah-brand-name">'+
+            '<span class="ah-name">'+
                 'AnimeHub'+
             '</span>'
         );
@@ -2495,32 +2362,39 @@ function topbar(
         $('<div class="ah-nav"></div>');
 
     function add(
-        key,
-        title,
-        action
+        k,
+        t,
+        a
     ){
-        var item=
+        var b=
             $('<div class="ah-navbtn selector"></div>')
-            .text(title);
+            .text(t);
 
-        if(active===key){
-            item.addClass(
+        if(active===k){
+            b.addClass(
                 'active'
             );
         }
 
-        item.on(
-            'hover:enter',
-            action
+        b.on(
+            'hover:enter click',
+
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
+
+                a();
+            }
         );
 
-        nav.append(item);
+        nav.append(b);
     }
 
     add(
         'home',
         'Главная',
-        homeNoop||
+        homeAction||
         openHome
     );
 
@@ -2562,8 +2436,9 @@ function topbar(
     );
 }
 
+
 /* ============================================================
- * DETAIL OPEN
+ * OPEN DETAIL
  * ============================================================ */
 
 function openDetail(a){
@@ -2590,22 +2465,19 @@ function openDetail(a){
             page:1,
 
             ah_item:
-                compactItem(a)
+                compact(a)
         });
 
         return;
     }
 
-    /* Resolve old V0.3 Shikimori favourites by title. */
-
+    /*
+     * Legacy V0.3 favourite:
+     * resolve old Shikimori item by title once opened.
+     */
     if(a.title){
         var net=
             new Lampa.Reguest();
-
-        try{
-            Lampa.Loading.start();
-        }
-        catch(e){}
 
         requestJson(
             net,
@@ -2617,28 +2489,14 @@ function openDetail(a){
                     mode:'search',
                     value:a.title,
                     page:1,
-                    limit:8
+                    limit:6
                 }
             ),
 
-            function(data){
-                try{
-                    Lampa.Loading.stop();
-                    net.clear();
-                }
-                catch(e){}
-
+            function(d){
                 var items=
-                    data.items||
+                    d.items||
                     [];
-
-                if(!items.length){
-                    notify(
-                        'Не удалось сопоставить старую запись'
-                    );
-
-                    return;
-                }
 
                 var best=
                     items[0];
@@ -2646,15 +2504,12 @@ function openDetail(a){
                 if(a.year){
                     items.some(
                         function(x){
-
                             if(
                                 intv(
-                                    x.year,
-                                    0
+                                    x.year
                                 )===
                                 intv(
-                                    a.year,
-                                    0
+                                    a.year
                                 )
                             ){
                                 best=x;
@@ -2666,23 +2521,30 @@ function openDetail(a){
                     );
                 }
 
-                openDetail(best);
-            },
+                if(best){
+                    openDetail(best);
+                }
+                else{
+                    notify(
+                        'Старая запись не найдена'
+                    );
+                }
 
-            function(){
                 try{
-                    Lampa.Loading.stop();
                     net.clear();
                 }
                 catch(e){}
+            },
 
+            function(){
                 notify(
-                    'Не удалось открыть старую запись'
+                    'Не удалось открыть запись'
                 );
             }
         );
     }
 }
+
 
 /* ============================================================
  * CARDS
@@ -2690,10 +2552,10 @@ function openDetail(a){
 
 function wideCard(
     a,
-    watch
+    state
 ){
-    var card=
-        $('<div class="ah-wide-card selector"></div>');
+    var c=
+        $('<div class="ah-wide selector"></div>');
 
     var bg=
         a.background||
@@ -2702,92 +2564,64 @@ function wideCard(
         '';
 
     if(bg){
-        $('<img alt="">')
-            .attr({
-                src:bg,
-                loading:'lazy'
-            })
-            .appendTo(card);
+        putImage(
+            c,
+            bg,
+            a.title,
+            false
+        );
     }
 
-    card.append(
-        '<div class="ah-wide-shade"></div>'
+    c.append(
+        '<div class="ah-cardshade"></div>'
     );
 
     if(
         a.status&&
-        a.status.alias==='ongoing'
+        a.status.alias===
+        'ongoing'
     ){
-        card.append(
-            '<div class="ah-wide-badge">'+
+        c.append(
+            '<div class="ah-badge">'+
                 'ОНГОИНГ'+
             '</div>'
         );
     }
-    else if(
-        a.status&&
-        a.status.alias==='announcement'
-    ){
-        card.append(
-            '<div class="ah-wide-badge">'+
-                'АНОНС'+
-            '</div>'
-        );
-    }
 
-    var meta=[];
+    var m=[
+        a.year||'',
+        typeLabel(a),
 
-    if(a.year){
-        meta.push(
-            a.year
-        );
-    }
-
-    meta.push(
-        typeLabel(a)
-    );
-
-    if(
         num(
-            a.score,
-            0
+            a.score
         )>0
-    ){
-        meta.push(
-            '★ '+
-            formatScore(
+            ?'★ '+
+            score(
                 a.score
             )
-        );
-    }
+            :'',
 
-    if(
         a.episodes&&
         a.episodes.aired
-    ){
-        meta.push(
-            intv(
-                a.episodes.aired,
-                0
+            ?intv(
+                a.episodes.aired
             )+
             ' сер.'
-        );
-    }
+            :''
+    ]
+    .filter(Boolean);
 
     if(
-        watch&&
-        num(
-            watch.episode,
-            0
-        )>0
+        state&&
+        state.episode
     ){
-        meta.unshift(
+        m.unshift(
             'Серия '+
-            watch.episode
+            state.episode
         );
     }
 
-    card.append(
+    c.append(
         '<div class="ah-wide-copy">'+
             '<div class="ah-wide-title">'+
                 esc(
@@ -2795,45 +2629,38 @@ function wideCard(
                     'Anime'
                 )+
             '</div>'+
-            '<div class="ah-wide-meta">'+
-                meta.map(
-                    function(x){
-                        return (
-                            '<span>'+
-                                esc(x)+
-                            '</span>'
-                        );
-                    }
-                )
-                .join('')+
+            '<div class="ah-smallmeta">'+
+                esc(
+                    m.join(
+                        ' • '
+                    )
+                )+
             '</div>'+
         '</div>'
     );
 
     if(
-        watch&&
+        state&&
         num(
-            watch.duration,
-            0
+            state.duration
         )>0&&
         num(
-            watch.position,
-            0
+            state.position
         )>0&&
-        !watch.completed
+        !state.completed
     ){
-        var progress=
+        var p=
             Math.max(
                 0,
                 Math.min(
                     100,
+
                     Math.round(
                         num(
-                            watch.position,
-                            0
+                            state.position
                         )/
                         num(
-                            watch.duration,
+                            state.duration,
                             1
                         )*
                         100
@@ -2841,50 +2668,54 @@ function wideCard(
                 )
             );
 
-        card.append(
-            '<div class="ah-wide-progress">'+
+        c.append(
+            '<div class="ah-progress">'+
                 '<span style="width:'+
-                    progress+
+                    p+
                     '%"></span>'+
             '</div>'
         );
     }
 
-    card.on(
-        'hover:enter',
+    c.on(
+        'hover:enter click',
 
-        function(){
+        function(e){
+            if(e){
+                e.preventDefault();
+            }
+
             openDetail(a);
         }
     );
 
-    return card;
+    return c;
 }
 
 function posterCard(a){
-    var card=
-        $('<div class="ah-poster-card selector"></div>');
+    var c=
+        $('<div class="ah-poster selector"></div>');
 
-    var media=
+    var m=
         $('<div class="ah-poster-media"></div>');
 
     putImage(
-        media,
+        m,
         a.poster,
-        a.title
+        a.title,
+        false
     );
 
     if(
         num(
-            a.score,
-            0
+            a.score
         )>0
     ){
-        media.append(
+        m.append(
             '<div class="ah-poster-score">'+
                 '★ '+
                 esc(
-                    formatScore(
+                    score(
                         a.score
                     )
                 )+
@@ -2892,19 +2723,8 @@ function posterCard(a){
         );
     }
 
-    if(
-        a.status&&
-        a.status.alias==='ongoing'
-    ){
-        media.append(
-            '<div class="ah-poster-status">'+
-                'ОНГОИНГ'+
-            '</div>'
-        );
-    }
-
-    card.append(
-        media,
+    c.append(
+        m,
 
         '<div class="ah-poster-title">'+
             esc(
@@ -2917,16 +2737,7 @@ function posterCard(a){
             esc(
                 [
                     a.year||'',
-                    typeLabel(a),
-
-                    a.episodes&&
-                    a.episodes.aired
-                        ?intv(
-                            a.episodes.aired,
-                            0
-                        )+
-                        ' сер.'
-                        :''
+                    typeLabel(a)
                 ]
                 .filter(Boolean)
                 .join(' • ')
@@ -2934,22 +2745,26 @@ function posterCard(a){
         '</div>'
     );
 
-    card.on(
-        'hover:enter',
+    c.on(
+        'hover:enter click',
 
-        function(){
+        function(e){
+            if(e){
+                e.preventDefault();
+            }
+
             openDetail(a);
         }
     );
 
-    return card;
+    return c;
 }
 
 function shelf(
     root,
     title,
     items,
-    watchMap
+    map
 ){
     if(
         !items||
@@ -2958,7 +2773,7 @@ function shelf(
         return;
     }
 
-    var section=
+    var s=
         $(
             '<div class="ah-shelf">'+
                 '<div class="ah-shelf-title">'+
@@ -2967,57 +2782,55 @@ function shelf(
             '</div>'
         );
 
-    var track=
-        $('<div class="ah-track"></div>');
+    var row=
+        $('<div class="ah-row"></div>');
 
     items
         .slice(
             0,
-            18
+            7
         )
-        .forEach(function(a){
+        .forEach(
+            function(a){
+                row.append(
+                    wideCard(
+                        a,
 
-            track.append(
-                wideCard(
-                    a,
-
-                    watchMap&&
-                    watchMap[
-                        String(a.id)
-                    ]
-                )
-            );
-        });
+                        map&&
+                        map[
+                            String(a.id)
+                        ]
+                    )
+                );
+            }
+        );
 
     root.append(
-        section.append(
-            track
-        )
+        s.append(row)
     );
 }
 
 function continueShelf(root){
     var states=
-        continueItems();
+        continueStates();
 
     if(!states.length){
         return;
     }
 
-    var map={};
+    var m={};
 
     var items=
         states.map(
-            function(state){
-
-                map[
+            function(x){
+                m[
                     String(
-                        state.anime.id
+                        x.anime.id
                     )
                 ]=
-                    state;
+                    x;
 
-                return state.anime;
+                return x.anime;
             }
         );
 
@@ -3025,21 +2838,570 @@ function continueShelf(root){
         root,
         'Продолжаем смотреть',
         items,
-        map
+        m
     );
 }
 
+
 /* ============================================================
- * VIDEOS
+ * RAW YUMMYANIME VIDEO HELPERS
+ *
+ * Keep the API record itself intact.
+ * This mirrors how the official plugin groups the records.
  * ============================================================ */
+
+function videoData(video){
+    var v=
+        video&&
+        video.data;
+
+    if(!v){
+        return {};
+    }
+
+    if(
+        typeof v==='object'
+    ){
+        return v;
+    }
+
+    if(
+        typeof v==='string'
+    ){
+        try{
+            return JSON.parse(v)||
+                {};
+        }
+        catch(e){
+            return {};
+        }
+    }
+
+    return {};
+}
+
+function normalizeVideoUrl(url){
+    url=
+        clean(url);
+
+    if(!url){
+        return '';
+    }
+
+    if(
+        url.indexOf('//')===
+        0
+    ){
+        return (
+            'https:'+
+            url
+        );
+    }
+
+    if(
+        /^http:\/\/(?:www\.)?kodik\./i
+            .test(url)
+    ){
+        return (
+            'https://'+
+            url.slice(7)
+        );
+    }
+
+    return url;
+}
+
+function videoSourceUrl(video){
+    if(!video){
+        return '';
+    }
+
+    var d=
+        videoData(video);
+
+    return normalizeVideoUrl(
+        video.yani_stream_url||
+        d.yani_stream_url||
+
+        video.iframe_url||
+        video.iframeUrl||
+
+        video.url||
+
+        video.player_url||
+        video.playerUrl||
+
+        video.link||
+
+        d.iframe_url||
+        d.iframeUrl||
+
+        d.url||
+
+        d.player_url||
+        d.playerUrl||
+
+        d.link
+    );
+}
+
+function videoHost(url){
+    try{
+        return new URL(url)
+            .hostname
+            .replace(
+                /^www\./,
+                ''
+            );
+    }
+    catch(e){
+        return '';
+    }
+}
+
+function episodeValue(
+    v,
+    index
+){
+    var x=
+        v&&
+        (
+            v.number!=null
+                ?v.number
+                :(
+                    v.episode!=null
+                        ?v.episode
+                        :v.index
+                )
+        );
+
+    if(
+        x===undefined||
+        x===null||
+        x===''
+    ){
+        x=
+            index+
+            1;
+    }
+
+    var m=
+        String(x)
+            .match(
+                /\d+(?:[.,]\d+)?/
+            );
+
+    return m
+        ?parseFloat(
+            m[0]
+                .replace(
+                    ',',
+                    '.'
+                )
+        )
+        :String(x);
+}
+
+function groupPart(v){
+    return clean(v)
+        .toLowerCase();
+}
+
+function voicePart(v){
+    return groupPart(v)
+        .replace(
+            /^\ufeff/,
+            ''
+        )
+        .replace(
+            /^(озвучка|дубляж|dub|dubbing)\s+/,
+            ''
+        );
+}
+
+function sourceKind(
+    url,
+    group
+){
+    var d=
+        videoData(group);
+
+    var v=
+        (
+            String(
+                url||
+                ''
+            )+
+            ' '+
+            String(
+                group&&
+                group.player||
+                ''
+            )+
+            ' '+
+            String(
+                d.player||
+                ''
+            )
+        )
+        .toLowerCase();
+
+    if(
+        /\.(m3u8|mpd|mp4|webm)(?:[?#].*)?$/i
+            .test(url)
+    ){
+        return 'direct';
+    }
+
+    if(
+        /iframecvh|cdnvideohub|(?:^|\s)cvh(?:\s|$)/i
+            .test(v)
+    ){
+        return 'cvh';
+    }
+
+    if(
+        /iframevk|vkvideo|vk\.com|video_ext\.php|(?:^|\s)vk(?:\s|$)/i
+            .test(v)
+    ){
+        return 'vk';
+    }
+
+    if(
+        /kodik/i
+            .test(v)
+    ){
+        return 'kodik';
+    }
+
+    if(
+        /aksor/i
+            .test(v)
+    ){
+        return 'aksor';
+    }
+
+    if(
+        /rutube/i
+            .test(v)
+    ){
+        return 'rutube';
+    }
+
+    return 'unsupported';
+}
+
+function groupVideos(videos){
+    var groups={};
+
+    (
+        videos||
+        []
+    )
+    .forEach(
+        function(v,index){
+            var url=
+                videoSourceUrl(v);
+
+            if(!url){
+                return;
+            }
+
+            /*
+             * One normalized URL field is useful,
+             * but we do not replace the original object.
+             */
+            v.iframe_url=
+                url;
+
+            v._ahEpisode=
+                episodeValue(
+                    v,
+                    index
+                );
+
+            var d=
+                videoData(v);
+
+            var title=
+                d.dubbing||
+                d.translation||
+                d.voice||
+                d.player||
+                'Источник';
+
+            var host=
+                videoHost(url);
+
+            var provider=
+                d.player_id||
+                d.player||
+                d.source||
+                d.service||
+                host;
+
+            var key=
+                voicePart(title)+
+                '|'+
+                groupPart(provider);
+
+            if(!groups[key]){
+                groups[key]={
+                    key:key,
+                    title:title,
+
+                    player:
+                        d.player||
+                        d.source||
+                        d.service||
+                        host,
+
+                    source:
+                        host,
+
+                    videos:[]
+                };
+            }
+
+            groups[key]
+                .videos
+                .push(v);
+        }
+    );
+
+    return Object.keys(groups)
+        .map(
+            function(k){
+                var g=
+                    groups[k];
+
+                g.videos.sort(
+                    function(a,b){
+                        var x=
+                            num(
+                                a._ahEpisode,
+                                99999
+                            );
+
+                        var y=
+                            num(
+                                b._ahEpisode,
+                                99999
+                            );
+
+                        return (
+                            x-
+                            y||
+                            intv(
+                                a.index
+                            )-
+                            intv(
+                                b.index
+                            )
+                        );
+                    }
+                );
+
+                g.kind=
+                    sourceKind(
+                        videoSourceUrl(
+                            g.videos[0]
+                        ),
+                        g.videos[0]
+                    );
+
+                return g;
+            }
+        )
+        .sort(
+            function(a,b){
+                var p={
+                    direct:6,
+                    cvh:5,
+                    vk:4,
+                    kodik:3,
+                    aksor:2,
+                    rutube:1,
+                    unsupported:0
+                };
+
+                return (
+                    (
+                        p[b.kind]||
+                        0
+                    )-
+                    (
+                        p[a.kind]||
+                        0
+                    )||
+                    clean(
+                        a.title
+                    )
+                    .localeCompare(
+                        clean(
+                            b.title
+                        ),
+                        'ru'
+                    )
+                );
+            }
+        );
+}
+
+function episodeNumbers(videos){
+    var seen={};
+    var out=[];
+
+    (
+        videos||
+        []
+    )
+    .forEach(
+        function(v,index){
+            var x=
+                episodeValue(
+                    v,
+                    index
+                );
+
+            var k=
+                String(x);
+
+            if(!seen[k]){
+                seen[k]=1;
+                out.push(x);
+            }
+        }
+    );
+
+    return out.sort(
+        function(a,b){
+            return (
+                num(
+                    a,
+                    99999
+                )-
+                num(
+                    b,
+                    99999
+                )
+            );
+        }
+    );
+}
+
+function findVideo(
+    group,
+    ep
+){
+    var found=null;
+
+    (
+        group&&
+        group.videos||
+        []
+    )
+    .some(
+        function(v){
+            if(
+                String(
+                    v._ahEpisode
+                )===
+                String(ep)||
+                Math.abs(
+                    num(
+                        v._ahEpisode,
+                        -999
+                    )-
+                    num(
+                        ep,
+                        -998
+                    )
+                )<
+                .0001
+            ){
+                found=v;
+                return true;
+            }
+
+            return false;
+        }
+    );
+
+    return found;
+}
+
+function groupsForEpisode(
+    videos,
+    ep
+){
+    return groupVideos(videos)
+        .filter(
+            function(g){
+                return !!findVideo(
+                    g,
+                    ep
+                );
+            }
+        );
+}
+
+
+/* ============================================================
+ * VIDEO REQUEST CACHE
+ *
+ * One request per title at a time.
+ * This prevents the detail episode rail and Watch button from
+ * starting duplicate large /videos requests.
+ * ============================================================ */
+
+function cacheVideos(
+    id,
+    videos
+){
+    id=
+        String(id);
+
+    if(videoCache[id]){
+        videoOrder=
+            videoOrder.filter(
+                function(x){
+                    return x!==id;
+                }
+            );
+    }
+
+    videoCache[id]={
+        at:Date.now(),
+        videos:videos
+    };
+
+    videoOrder.push(id);
+
+    while(
+        videoOrder.length>
+        VIDEO_CACHE_MAX
+    ){
+        delete videoCache[
+            videoOrder.shift()
+        ];
+    }
+}
 
 function loadVideos(
     a,
     ok,
     fail,
-    loading
+    showLoading
 ){
-    if(!a||!a.id){
+    var id=
+        String(
+            a&&
+            a.id||
+            ''
+        );
+
+    if(!id){
         if(fail){
             fail();
         }
@@ -3047,22 +3409,19 @@ function loadVideos(
         return;
     }
 
-    var key=
-        String(a.id);
-
-    var cached=
-        videoCache[key];
+    var c=
+        videoCache[id];
 
     if(
-        cached&&
+        c&&
         Date.now()-
-        cached.time<
+        c.at<
         120000
     ){
         setTimeout(
             function(){
                 ok(
-                    cached.data
+                    c.videos
                 );
             },
             0
@@ -3071,6 +3430,27 @@ function loadVideos(
         return;
     }
 
+    /*
+     * Another part of the detail page already requested videos.
+     * Attach to that same request.
+     */
+    if(videoInflight[id]){
+        videoInflight[id]
+            .push({
+                ok:ok,
+                fail:fail
+            });
+
+        return;
+    }
+
+    videoInflight[id]=[
+        {
+            ok:ok,
+            fail:fail
+        }
+    ];
+
     var net=
         new Lampa.Reguest();
 
@@ -3078,7 +3458,7 @@ function loadVideos(
         22000
     );
 
-    if(loading!==false){
+    if(showLoading!==false){
         try{
             Lampa.Loading.start();
         }
@@ -3091,397 +3471,393 @@ function loadVideos(
         workerUrl(
             'videos',
             {
-                id:a.id
+                id:id
             }
         ),
 
-        function(data){
-
-            if(loading!==false){
+        function(d){
+            if(showLoading!==false){
                 try{
                     Lampa.Loading.stop();
                 }
                 catch(e){}
             }
 
-            videoCache[key]={
-                time:Date.now(),
-                data:
-                    data.videos||
-                    []
-            };
+            var videos=
+                d.videos||
+                [];
+
+            var wait=
+                videoInflight[id]||
+                [];
+
+            delete videoInflight[id];
+
+            cacheVideos(
+                id,
+                videos
+            );
 
             try{
                 net.clear();
             }
             catch(e){}
 
-            ok(
-                data.videos||
-                []
+            wait.forEach(
+                function(x){
+                    x.ok(videos);
+                }
             );
         },
 
         function(e){
-
-            if(loading!==false){
+            if(showLoading!==false){
                 try{
                     Lampa.Loading.stop();
                 }
                 catch(x){}
             }
 
+            var wait=
+                videoInflight[id]||
+                [];
+
+            delete videoInflight[id];
+
             try{
                 net.clear();
             }
             catch(x){}
 
-            if(fail){
-                fail(e);
-            }
-            else{
-                notify(
-                    'Не удалось загрузить видео'
-                );
-            }
-        }
-    );
-}
-
-function sourcePriority(source){
-    var map={
-        direct:0,
-        cvh:1,
-        vk:2,
-        kodik:3,
-        aksor:4,
-        rutube:5,
-        sibnet:6
-    };
-
-    return map[source]!==undefined
-        ?map[source]
-        :99;
-}
-
-function normalizeVoice(value){
-    return clean(
-        value||
-        'Без названия'
-    )
-    .replace(
-        /^\ufeff/,
-        ''
-    );
-}
-
-function groupKey(video){
-    return (
-        normalizeVoice(
-            video.dubbing
-        )
-        .toLowerCase()+
-        '|'+
-        clean(
-            video.provider||
-            video.player||
-            video.source
-        )
-        .toLowerCase()
-    );
-}
-
-function groupVideos(videos){
-    var groups={};
-
-    (
-        videos||
-        []
-    )
-    .filter(function(v){
-        return (
-            v&&
-            v.supported&&
-            v.iframe
-        );
-    })
-    .forEach(function(v){
-
-        var key=
-            groupKey(v);
-
-        if(!groups[key]){
-            groups[key]={
-                key:key,
-
-                dubbing:
-                    v.dubbing||
-                    'Без названия',
-
-                player:
-                    v.player||
-                    v.provider||
-                    v.source,
-
-                provider:
-                    v.provider||
-                    '',
-
-                source:
-                    v.source,
-
-                videos:[]
-            };
-        }
-
-        groups[key]
-            .videos
-            .push(v);
-    });
-
-    return Object.keys(groups)
-        .map(function(k){
-
-            groups[k]
-                .videos
-                .sort(
-                    function(a,b){
-                        return (
-                            num(
-                                a.number,
-                                0
-                            )-
-                            num(
-                                b.number,
-                                0
-                            )||
-                            intv(
-                                a.index,
-                                0
-                            )-
-                            intv(
-                                b.index,
-                                0
-                            )
-                        );
+            wait.forEach(
+                function(x){
+                    if(x.fail){
+                        x.fail(e);
                     }
+                }
+            );
+        }
+    );
+}
+
+
+/* ============================================================
+ * PLAYBACK
+ *
+ * Simplified deliberately:
+ *
+ * Watch:
+ *   resume episode or first episode
+ *
+ * Inline episode:
+ *   play that episode
+ *
+ * If that episode has multiple voices:
+ *   show ONE voice picker
+ *
+ * No extra episode/quality picker chain.
+ * Lampa receives the quality map itself.
+ * ============================================================ */
+
+function restoreContent(){
+    setTimeout(
+        function(){
+            try{
+                Lampa.Controller.toggle(
+                    'content'
                 );
-
-            return groups[k];
-        })
-        .sort(function(a,b){
-
-            return (
-                sourcePriority(
-                    a.source
-                )-
-                sourcePriority(
-                    b.source
-                )||
-                clean(
-                    a.dubbing
-                )
-                .localeCompare(
-                    clean(
-                        b.dubbing
-                    ),
-                    'ru'
-                )
-            );
-        });
-}
-
-function uniqueEpisodes(group){
-    var seen={};
-    var out=[];
-
-    (
-        group&&
-        group.videos||
-        []
-    )
-    .forEach(function(v){
-
-        var key=
-            String(
-                num(
-                    v.number,
-                    0
-                )
-            );
-
-        if(
-            !key||
-            seen[key]
-        ){
-            return;
-        }
-
-        seen[key]=1;
-
-        out.push(v);
-    });
-
-    return out.sort(
-        function(a,b){
-            return (
-                num(
-                    a.number,
-                    0
-                )-
-                num(
-                    b.number,
-                    0
-                )
-            );
-        }
+            }
+            catch(e){}
+        },
+        0
     );
 }
 
-function availableEpisodes(videos){
-    var seen={};
-    var out=[];
-
-    (
-        videos||
-        []
-    )
-    .filter(function(v){
-        return (
-            v&&
-            v.supported&&
-            v.iframe
+function playEpisode(
+    anime,
+    videos,
+    ep
+){
+    var groups=
+        groupsForEpisode(
+            videos,
+            ep
         );
-    })
-    .forEach(function(v){
 
-        var n=
-            num(
-                v.number,
-                0
-            );
+    if(!groups.length){
+        notify(
+            'Для этой серии нет источника'
+        );
 
-        var key=
-            String(n);
+        restoreContent();
+        return;
+    }
 
-        if(
-            !n||
-            seen[key]
-        ){
-            return;
-        }
+    var state=
+        watch(anime);
 
-        seen[key]=1;
-        out.push(n);
-    });
+    var preferred=null;
 
-    return out.sort(
-        function(a,b){
-            return a-b;
-        }
-    );
-}
+    if(state.providerKey){
+        groups.some(
+            function(g){
+                if(
+                    g.key===
+                    state.providerKey
+                ){
+                    preferred=g;
+                    return true;
+                }
 
-function findVideo(
-    group,
-    episode
-){
-    var best=null;
+                return false;
+            }
+        );
+    }
 
-    (
-        group&&
-        group.videos||
-        []
-    )
-    .some(function(v){
-
-        if(
-            Math.abs(
-                num(
-                    v.number,
-                    0
-                )-
-                num(
-                    episode,
-                    0
-                )
-            )<
-            .0001
-        ){
-            best=v;
-            return true;
-        }
-
-        return false;
-    });
-
-    return best;
-}
-
-function qualityKeys(qualities){
-    return Object.keys(
-        qualities||
-        {}
-    )
-    .sort(function(a,b){
-
-        var na=
-            intv(
-                String(a)
-                    .replace(
-                        /\D/g,
-                        ''
-                    ),
-                0
-            );
-
-        var nb=
-            intv(
-                String(b)
-                    .replace(
-                        /\D/g,
-                        ''
-                    ),
-                0
-            );
-
-        if(na&&nb){
-            return nb-na;
-        }
-
-        if(a==='auto'){
-            return 1;
-        }
-
-        if(b==='auto'){
-            return -1;
-        }
-
-        return String(b)
-            .localeCompare(
-                String(a)
-            );
-    });
-}
-
-function resolveVideo(
-    video,
-    ok,
-    fail
-){
+    /*
+     * One source, or previously used source:
+     * play directly. No Select window needed.
+     */
     if(
-        !video||
-        !video.iframe
+        groups.length===1||
+        preferred
     ){
-        if(fail){
-            fail({
-                message:
-                    'Нет адреса плеера'
-            });
-        }
+        var group=
+            preferred||
+            groups[0];
+
+        resolveAndPlay(
+            anime,
+            group,
+            findVideo(
+                group,
+                ep
+            )
+        );
 
         return;
     }
+
+    selectBox(
+        'Озвучка • Серия '+
+        ep,
+
+        groups.map(
+            function(g){
+                return {
+                    title:
+                        g.title+
+                        (
+                            g.player&&
+                            g.player!==g.title
+                                ?' · '+
+                                g.player
+                                :''
+                        ),
+
+                    subtitle:
+                        g.kind
+                            .toUpperCase(),
+
+                    group:g
+                };
+            }
+        ),
+
+        function(item){
+            setTimeout(
+                function(){
+                    resolveAndPlay(
+                        anime,
+                        item.group,
+
+                        findVideo(
+                            item.group,
+                            ep
+                        )
+                    );
+                },
+                0
+            );
+        },
+
+        restoreContent
+    );
+}
+
+function watchAnime(
+    anime,
+    videos,
+    forcedEp
+){
+    function go(list){
+        var eps=
+            episodeNumbers(list);
+
+        if(!eps.length){
+            notify(
+                'Видео для этого тайтла не найдено'
+            );
+
+            restoreContent();
+            return;
+        }
+
+        var st=
+            watch(anime);
+
+        var ep=
+            forcedEp!=null
+                ?forcedEp
+                :num(
+                    st.episode,
+                    0
+                );
+
+        if(
+            eps.indexOf(ep)<
+            0
+        ){
+            ep=
+                eps[0];
+        }
+        else if(
+            st.completed&&
+            forcedEp==null
+        ){
+            var ix=
+                eps.indexOf(ep);
+
+            if(
+                ix>=0&&
+                ix<
+                eps.length-
+                1
+            ){
+                ep=
+                    eps[
+                        ix+
+                        1
+                    ];
+            }
+        }
+
+        playEpisode(
+            anime,
+            list,
+            ep
+        );
+    }
+
+    try{
+        Lampa.Loading.start();
+    }
+    catch(e){}
+
+    if(videos){
+        try{
+            Lampa.Loading.stop();
+        }
+        catch(e){}
+
+        go(videos);
+    }
+    else{
+        loadVideos(
+            anime,
+            go,
+
+            function(){
+                notify(
+                    'Не удалось загрузить источники'
+                );
+
+                restoreContent();
+            },
+
+            true
+        );
+    }
+}
+
+function resolveAndPlay(
+    anime,
+    group,
+    video
+){
+    if(!video){
+        notify(
+            'Видео не найдено'
+        );
+
+        restoreContent();
+        return;
+    }
+
+    var url=
+        videoSourceUrl(video);
+
+    if(!url){
+        notify(
+            'У источника нет адреса'
+        );
+
+        restoreContent();
+        return;
+    }
+
+    var data=
+        videoData(video);
+
+    /*
+     * The API/plugin may already have a resolved stream.
+     * Never resolve an already-direct stream again.
+     */
+    var direct=
+        video.yani_stream_url||
+        data.yani_stream_url;
+
+    if(direct){
+        launchPlayer(
+            anime,
+            group,
+            video,
+
+            {
+                url:
+                    normalizeVideoUrl(
+                        direct
+                    ),
+
+                quality:
+                    video.yani_stream_quality||
+                    data.yani_stream_quality||
+                    'auto',
+
+                qualities:
+                    video.yani_stream_qualities||
+                    data.yani_stream_qualities||
+                    {
+                        auto:
+                            normalizeVideoUrl(
+                                direct
+                            )
+                    },
+
+                headers:
+                    video.yani_stream_headers||
+                    data.yani_stream_headers||
+                    {}
+            }
+        );
+
+        return;
+    }
+
+    try{
+        Lampa.Loading.start();
+    }
+    catch(e){}
 
     var net=
         new Lampa.Reguest();
@@ -3497,13 +3873,11 @@ function resolveVideo(
             'resolve',
 
             {
-                url:
-                    video.iframe,
+                url:url,
 
                 player:
-                    video.source||
-                    video.player||
-                    video.provider||
+                    group.kind||
+                    group.player||
                     '',
 
                 ua:
@@ -3515,152 +3889,150 @@ function resolveVideo(
             }
         ),
 
-        function(data){
-
+        function(d){
             try{
+                Lampa.Loading.stop();
                 net.clear();
             }
             catch(e){}
 
-            ok(
-                data.stream||
-                {}
+            if(
+                !d.stream||
+                !d.stream.url
+            ){
+                notify(
+                    'Прямой поток не найден'
+                );
+
+                restoreContent();
+                return;
+            }
+
+            /*
+             * Store resolved fields ON the original video object,
+             * matching the official YummyAnime approach.
+             */
+            video.yani_stream_url=
+                d.stream.url;
+
+            video.yani_stream_quality=
+                d.stream.quality||
+                '';
+
+            video.yani_stream_qualities=
+                d.stream.qualities||
+                null;
+
+            video.yani_stream_headers=
+                d.stream.headers||
+                null;
+
+            launchPlayer(
+                anime,
+                group,
+                video,
+                d.stream
             );
         },
 
         function(e){
-
             try{
+                Lampa.Loading.stop();
                 net.clear();
             }
             catch(x){}
 
-            if(fail){
-                fail(e||{});
-            }
+            notify(
+                'Источник не открылся: '+
+                clean(
+                    e&&
+                    e.message||
+                    'ошибка'
+                )
+            );
+
+            restoreContent();
         }
     );
 }
 
-/* ============================================================
- * NATIVE PLAYER
- * ============================================================ */
+function extension(url){
+    var m=
+        String(
+            url||
+            ''
+        )
+        .match(
+            /\.(m3u8|mpd|mp4|webm)(?:[?#]|$)/i
+        );
 
-function playerCard(a){
-    return {
-        id:a.id||'',
-
-        title:
-            a.title||
-            'AnimeHub',
-
-        name:
-            a.title||
-            'AnimeHub',
-
-        original_title:
-            a.original||
-            a.title||
-            '',
-
-        original_name:
-            a.original||
-            '',
-
-        release_date:
-            a.year
-                ?String(
-                    a.year
-                )+
-                '-01-01'
-                :'',
-
-        first_air_date:
-            a.year
-                ?String(
-                    a.year
-                )+
-                '-01-01'
-                :'',
-
-        poster_path:
-            a.poster||
-            '',
-
-        source:
-            'animehub',
-
-        animehub_id:
-            String(
-                a.id||
-                ''
-            )
-    };
+    return m
+        ?m[1]
+            .toLowerCase()
+        :'';
 }
 
-function startResolvedPlayback(
+function launchPlayer(
     anime,
-    video,
     group,
-    resolved,
-    quality,
-    url
+    video,
+    stream
 ){
+    var url=
+        stream.url;
+
+    var ext=
+        extension(url);
+
     var old=
-        watchState(anime);
+        watch(anime);
 
     var same=
         Math.abs(
             num(
-                old.episode,
-                0
+                old.episode
             )-
             num(
-                video.number,
-                0
+                video._ahEpisode
             )
         )<
         .0001;
 
-    saveWatchState(
-        anime,
+    var time=
+        same&&
+        !old.completed
+            ?num(
+                old.position
+            )
+            :0;
 
+    saveWatch(
+        anime,
         {
             episode:
-                video.number,
+                video._ahEpisode,
 
             videoId:
-                video.id,
+                video.video_id||
+                video.id||
+                '',
 
             providerKey:
                 group.key,
 
             provider:
-                group.source,
+                group.kind,
 
             dubbing:
-                group.dubbing,
-
-            player:
-                group.player,
-
-            quality:
-                quality,
+                group.title,
 
             position:
-                same&&
-                !old.completed
-                    ?num(
-                        old.position,
-                        0
-                    )
-                    :0,
+                time,
 
             duration:
                 same
                     ?num(
-                        old.duration,
-                        0
+                        old.duration
                     )
                     :0,
 
@@ -3671,93 +4043,89 @@ function startResolvedPlayback(
         }
     );
 
-    var card=
-        playerCard(anime);
-
+    /*
+     * Match Lampa/YummyAnime's native direct item shape:
+     * - URL
+     * - resume time
+     * - isonline
+     * - quality map
+     * - optional headers
+     */
     var item={
-        url:url,
-
-        quality:
-            resolved.qualities||
-            {},
-
-        headers:
-            resolved.headers||
-            {},
-
         title:
             (
                 anime.title||
                 'AnimeHub'
             )+
             ' • Серия '+
-            video.number+
+            video._ahEpisode+
             ' • '+
-            (
-                group.dubbing||
-                group.player||
-                ''
-            ),
+            group.title,
 
-        season:1,
+        url:
+            url,
 
-        episode:
-            video.number,
+        time:
+            time,
 
-        movie:
-            card,
+        isonline:
+            true,
 
-        card:
-            card,
+        quality:
+            stream.qualities||
+            {
+                auto:url
+            },
 
-        source:
-            'AnimeHub • '+
-            String(
-                group.source||
-                group.player||
-                ''
-            )
-            .toUpperCase(),
+        headers:
+            stream.headers||
+            {},
 
-        animehub_id:
-            String(
-                anime.id
-            ),
-
-        animehub_episode:
-            video.number,
-
-        animehub_video_id:
-            video.id,
-
-        animehub_provider_key:
-            group.key,
-
-        animehub_provider:
-            group.source,
-
-        animehub_dubbing:
-            group.dubbing,
-
-        animehub_quality:
-            quality,
-
-        animehub_anime:
-            compactItem(anime)
+        poster:
+            anime.poster||
+            ''
     };
 
+    if(ext){
+        item.extension=
+            ext;
+    }
+
+    if(ext==='mp4'){
+        item.mime=
+            'video/mp4';
+    }
+    else if(ext==='m3u8'){
+        item.mime=
+            'application/vnd.apple.mpegurl';
+    }
+
+    item.animehub_anime=
+        compact(anime);
+
+    item.animehub_episode=
+        video._ahEpisode;
+
+    item.animehub_provider_key=
+        group.key;
+
+    item.animehub_video_id=
+        video.video_id||
+        video.id||
+        '';
+
     try{
-        if(Lampa.Player.runas){
-            Lampa.Player.runas(
-                'lampa'
-            );
-        }
+        Lampa.Player.runas(
+            'lampa'
+        );
 
         Lampa.Player.play(
             item
         );
 
-        if(Lampa.Player.playlist){
+        if(
+            Lampa.Player.playlist
+        ){
             Lampa.Player.playlist(
                 [item]
             );
@@ -3770,468 +4138,25 @@ function startResolvedPlayback(
         );
 
         notify(
-            'Не удалось запустить плеер Lampa'
+            'Не удалось запустить Lampa Player'
         );
 
-        try{
-            Lampa.Controller.toggle(
-                'content'
-            );
-        }
-        catch(x){}
+        restoreContent();
     }
 }
 
-function launchVideo(
-    anime,
-    group,
-    video
-){
-    try{
-        Lampa.Loading.start();
-    }
-    catch(e){}
-
-    resolveVideo(
-        video,
-
-        function(stream){
-
-            try{
-                Lampa.Loading.stop();
-            }
-            catch(e){}
-
-            var keys=
-                qualityKeys(
-                    stream.qualities||
-                    {}
-                );
-
-            if(
-                !keys.length&&
-                stream.url
-            ){
-                stream.qualities={
-                    auto:
-                        stream.url
-                };
-
-                keys=[
-                    'auto'
-                ];
-            }
-
-            if(!keys.length){
-                notify(
-                    'Прямой поток не найден'
-                );
-
-                try{
-                    Lampa.Controller.toggle(
-                        'content'
-                    );
-                }
-                catch(e){}
-
-                return;
-            }
-
-            if(keys.length===1){
-                startResolvedPlayback(
-                    anime,
-                    video,
-                    group,
-                    stream,
-                    keys[0],
-
-                    stream.qualities[
-                        keys[0]
-                    ]||
-                    stream.url
-                );
-
-                return;
-            }
-
-            showPlaybackSelect({
-                title:
-                    'Качество • Серия '+
-                    video.number,
-
-                items:
-                    keys.map(
-                        function(key){
-                            return {
-                                title:
-                                    key==='auto'
-                                        ?'Авто'
-                                        :key,
-
-                                quality:
-                                    key
-                            };
-                        }
-                    ),
-
-                onSelect:
-                    function(item){
-
-                        var playUrl=
-                            stream.qualities[
-                                item.quality
-                            ]||
-                            stream.url;
-
-                        chainSelect(
-                            function(){
-
-                                startResolvedPlayback(
-                                    anime,
-                                    video,
-                                    group,
-                                    stream,
-                                    item.quality,
-                                    playUrl
-                                );
-                            }
-                        );
-                    }
-            });
-        },
-
-        function(error){
-
-            try{
-                Lampa.Loading.stop();
-            }
-            catch(x){}
-
-            notify(
-                'Источник не открылся: '+
-                clean(
-                    error&&
-                    error.message||
-                    'ошибка'
-                )
-            );
-
-            try{
-                Lampa.Controller.toggle(
-                    'content'
-                );
-            }
-            catch(x){}
-        }
-    );
-}
-
-function chooseEpisode(
-    anime,
-    group,
-    forcedEpisode
-){
-    var episodes=
-        uniqueEpisodes(group);
-
-    if(forcedEpisode!=null){
-        var exact=
-            findVideo(
-                group,
-                forcedEpisode
-            );
-
-        if(!exact){
-            notify(
-                'В этой озвучке серия недоступна'
-            );
-
-            try{
-                Lampa.Controller.toggle(
-                    'content'
-                );
-            }
-            catch(e){}
-
-            return;
-        }
-
-        launchVideo(
-            anime,
-            group,
-            exact
-        );
-
-        return;
-    }
-
-    var state=
-        watchState(anime);
-
-    var selected=0;
-
-    if(
-        num(
-            state.episode,
-            0
-        )>0
-    ){
-        episodes.some(
-            function(video,index){
-
-                if(
-                    Math.abs(
-                        num(
-                            video.number,
-                            0
-                        )-
-                        num(
-                            state.episode,
-                            0
-                        )
-                    )<
-                    .0001
-                ){
-                    selected=index;
-                    return true;
-                }
-
-                return false;
-            }
-        );
-    }
-
-    if(episodes.length===1){
-        launchVideo(
-            anime,
-            group,
-            episodes[0]
-        );
-
-        return;
-    }
-
-    showPlaybackSelect({
-        title:
-            'Выберите серию • '+
-            group.dubbing,
-
-        items:
-            episodes.map(
-                function(video){
-
-                    var suffix=
-                        Math.abs(
-                            num(
-                                video.number,
-                                0
-                            )-
-                            num(
-                                state.episode,
-                                0
-                            )
-                        )<
-                        .0001
-                            ?(
-                                state.completed
-                                    ?' • просмотрено'
-                                    :' • продолжить'
-                            )
-                            :'';
-
-                    return {
-                        title:
-                            'Серия '+
-                            video.number+
-                            suffix,
-
-                        video:
-                            video
-                    };
-                }
-            ),
-
-        selected:
-            selected,
-
-        onSelect:
-            function(item){
-
-                chainSelect(
-                    function(){
-
-                        launchVideo(
-                            anime,
-                            group,
-                            item.video
-                        );
-                    }
-                );
-            }
-    });
-}
-
-function chooseVoice(
-    anime,
-    videos,
-    forcedEpisode
-){
-    var groups=
-        groupVideos(videos);
-
-    if(forcedEpisode!=null){
-        groups=
-            groups.filter(
-                function(group){
-
-                    return !!findVideo(
-                        group,
-                        forcedEpisode
-                    );
-                }
-            );
-    }
-
-    if(!groups.length){
-        notify(
-            'Для этой серии нет поддерживаемого источника'
-        );
-
-        try{
-            Lampa.Controller.toggle(
-                'content'
-            );
-        }
-        catch(e){}
-
-        return;
-    }
-
-    var state=
-        watchState(anime);
-
-    var selected=0;
-
-    if(state.providerKey){
-        groups.some(
-            function(group,index){
-
-                if(
-                    group.key===
-                    state.providerKey
-                ){
-                    selected=index;
-                    return true;
-                }
-
-                return false;
-            }
-        );
-    }
-
-    if(groups.length===1){
-        chooseEpisode(
-            anime,
-            groups[0],
-            forcedEpisode
-        );
-
-        return;
-    }
-
-    showPlaybackSelect({
-        title:
-            forcedEpisode!=null
-                ?(
-                    'Озвучка • Серия '+
-                    forcedEpisode
-                )
-                :'Выберите озвучку',
-
-        items:
-            groups.map(
-                function(group){
-
-                    return {
-                        title:
-                            group.dubbing,
-
-                        subtitle:
-                            String(
-                                group.player||
-                                group.source||
-                                ''
-                            )
-                            .toUpperCase()+
-                            ' • '+
-                            uniqueEpisodes(
-                                group
-                            ).length+
-                            ' сер.',
-
-                        group:
-                            group
-                    };
-                }
-            ),
-
-        selected:
-            selected,
-
-        onSelect:
-            function(item){
-
-                chainSelect(
-                    function(){
-
-                        chooseEpisode(
-                            anime,
-                            item.group,
-                            forcedEpisode
-                        );
-                    }
-                );
-            }
-    });
-}
-
-function watchAnime(
-    anime,
-    videos,
-    forcedEpisode
-){
-    function go(list){
-        chooseVoice(
-            anime,
-            list,
-            forcedEpisode
-        );
-    }
-
-    if(videos){
-        go(videos);
-    }
-    else{
-        loadVideos(
-            anime,
-            go,
-            null,
-            true
-        );
-    }
-}
 
 /* ============================================================
- * WATCH PROGRESS
+ * PROGRESS TRACKER
  * ============================================================ */
 
-function installPlaybackTracker(){
-    var marker=
+function installTracker(){
+    var key=
         NS+
         '_tracker';
 
     if(
-        window[marker]||
+        window[key]||
         !Lampa.Player||
         !Lampa.Player.listener||
         !Lampa.PlayerVideo||
@@ -4240,203 +4165,98 @@ function installPlaybackTracker(){
         return;
     }
 
-    window[marker]=true;
+    window[key]=true;
 
     Lampa.Player.listener.follow(
         'start',
 
         function(data){
-
             if(
                 !data||
-                !data.animehub_id||
                 !data.animehub_anime
             ){
                 return;
             }
 
-            var active=true;
-
-            var anime=
+            var a=
                 data.animehub_anime;
 
-            var episode=
-                num(
-                    data.animehub_episode,
-                    0
-                );
+            var ep=
+                data.animehub_episode;
 
-            var lastSave=0;
+            var last=0;
+            var active=true;
 
-            function canplay(){
-
-                try{
-                    Lampa.PlayerVideo.listener.remove(
-                        'canplay',
-                        canplay
-                    );
-                }
-                catch(e){}
-
-                var state=
-                    watchState(anime);
-
-                if(
-                    !active||
-                    Math.abs(
-                        num(
-                            state.episode,
-                            0
-                        )-
-                        episode
-                    )>
-                    .0001||
-                    state.completed||
-                    num(
-                        state.position,
-                        0
-                    )<
-                    20
-                ){
-                    return;
-                }
-
-                try{
-                    var player=
-                        Lampa.PlayerVideo.video();
-
-                    var position=
-                        num(
-                            state.position,
-                            0
-                        );
-
-                    if(
-                        player&&
-                        position>20&&
-                        (
-                            !player.duration||
-                            position<
-                            player.duration-
-                            35
-                        )
-                    ){
-                        player.currentTime=
-                            position;
-                    }
-                }
-                catch(e){}
-            }
-
-            function timeupdate(e){
-
+            function tick(e){
                 if(
                     !active||
                     Date.now()-
-                    lastSave<
+                    last<
                     10000
                 ){
                     return;
                 }
 
-                lastSave=
+                last=
                     Date.now();
 
-                var current=
+                var cur=
                     num(
-                        e&&e.current,
-                        0
+                        e&&
+                        e.current
                     );
 
-                var duration=
+                var dur=
                     num(
-                        e&&e.duration,
-                        0
+                        e&&
+                        e.duration
                     );
 
-                if(current<=0){
-                    return;
+                if(cur>0){
+                    saveWatch(
+                        a,
+                        {
+                            episode:
+                                ep,
+
+                            videoId:
+                                data.animehub_video_id||
+                                '',
+
+                            providerKey:
+                                data.animehub_provider_key||
+                                '',
+
+                            position:
+                                cur,
+
+                            duration:
+                                dur,
+
+                            completed:
+                                dur>0&&
+                                cur>=
+                                dur-
+                                25
+                        }
+                    );
                 }
-
-                saveWatchState(
-                    anime,
-
-                    {
-                        episode:
-                            episode,
-
-                        videoId:
-                            data.animehub_video_id||
-                            '',
-
-                        providerKey:
-                            data.animehub_provider_key||
-                            '',
-
-                        provider:
-                            data.animehub_provider||
-                            '',
-
-                        dubbing:
-                            data.animehub_dubbing||
-                            '',
-
-                        quality:
-                            data.animehub_quality||
-                            '',
-
-                        position:
-                            current,
-
-                        duration:
-                            duration,
-
-                        completed:
-                            duration>0&&
-                            current>=
-                            duration-
-                            25
-                    }
-                );
             }
 
             function ended(){
-                if(!active){
-                    return;
+                if(active){
+                    saveWatch(
+                        a,
+                        {
+                            episode:
+                                ep,
+
+                            position:0,
+                            duration:0,
+                            completed:true
+                        }
+                    );
                 }
-
-                saveWatchState(
-                    anime,
-
-                    {
-                        episode:
-                            episode,
-
-                        videoId:
-                            data.animehub_video_id||
-                            '',
-
-                        providerKey:
-                            data.animehub_provider_key||
-                            '',
-
-                        provider:
-                            data.animehub_provider||
-                            '',
-
-                        dubbing:
-                            data.animehub_dubbing||
-                            '',
-
-                        quality:
-                            data.animehub_quality||
-                            '',
-
-                        position:0,
-                        duration:0,
-                        completed:true
-                    }
-                );
             }
 
             function destroy(){
@@ -4444,13 +4264,8 @@ function installPlaybackTracker(){
 
                 try{
                     Lampa.PlayerVideo.listener.remove(
-                        'canplay',
-                        canplay
-                    );
-
-                    Lampa.PlayerVideo.listener.remove(
                         'timeupdate',
-                        timeupdate
+                        tick
                     );
 
                     Lampa.PlayerVideo.listener.remove(
@@ -4467,13 +4282,8 @@ function installPlaybackTracker(){
             }
 
             Lampa.PlayerVideo.listener.follow(
-                'canplay',
-                canplay
-            );
-
-            Lampa.PlayerVideo.listener.follow(
                 'timeupdate',
-                timeupdate
+                tick
             );
 
             Lampa.PlayerVideo.listener.follow(
@@ -4488,6 +4298,7 @@ function installPlaybackTracker(){
         }
     );
 }
+
 
 /* ============================================================
  * HOME
@@ -4507,7 +4318,7 @@ function HomeComponent(){
 
     var nav;
 
-    function render(data){
+    function render(d){
         if(!alive){
             return;
         }
@@ -4521,226 +4332,196 @@ function HomeComponent(){
                 )
             );
 
-        var anime=
-            data.hero;
+        var a=
+            d.hero;
 
-        if(anime){
-            var hero=
+        if(a){
+            var h=
                 $('<div class="ah-hero"></div>');
 
             var bg=
-                anime.background||
-                anime.posterHero||
-                anime.poster||
+                a.background||
+                a.posterHero||
+                a.poster||
                 '';
 
             if(bg){
-                $('<img class="ah-hero-bg" alt="">')
-                    .attr(
-                        'src',
-                        bg
-                    )
-                    .addClass(
-                        anime.background
-                            ?''
-                            :'ah-poster-bg'
-                    )
-                    .appendTo(hero);
+                putBackground(
+                    h,
+                    bg
+                );
             }
 
-            hero.append(
-                '<div class="ah-hero-shade"></div>'
+            h.append(
+                '<div class="ah-shade"></div>'
             );
 
-            var content=
-                $('<div class="ah-hero-content"></div>');
+            var c=
+                $('<div class="ah-hero-copy"></div>');
 
-            content.append(
+            c.append(
                 '<div class="ah-kicker">'+
                     'Сейчас в центре внимания'+
                 '</div>'+
-                '<div class="ah-hero-title">'+
+                '<div class="ah-title">'+
                     esc(
-                        anime.title||
+                        a.title||
                         'AnimeHub'
                     )+
                 '</div>'
             );
 
             if(
-                anime.original&&
-                anime.original!==
-                anime.title
+                a.original&&
+                a.original!==
+                a.title
             ){
-                content.append(
-                    '<div class="ah-original-title">'+
+                c.append(
+                    '<div class="ah-original">'+
                         esc(
-                            anime.original
+                            a.original
                         )+
                     '</div>'
                 );
             }
 
-            var meta=
+            var m=
                 $('<div class="ah-meta"></div>');
 
             if(
                 num(
-                    anime.score,
-                    0
+                    a.score
                 )>0
             ){
-                meta.append(
-                    '<span class="ah-chip score">'+
+                m.append(
+                    '<span class="ah-chip ah-score">'+
                         '★ '+
                         esc(
-                            formatScore(
-                                anime.score
+                            score(
+                                a.score
                             )
                         )+
                     '</span>'
                 );
             }
 
-            if(anime.year){
-                meta.append(
+            if(a.year){
+                m.append(
                     '<span class="ah-chip">'+
                         esc(
-                            anime.year
+                            a.year
                         )+
                     '</span>'
                 );
             }
 
-            meta.append(
+            m.append(
                 '<span class="ah-chip">'+
                     esc(
-                        typeLabel(anime)
+                        typeLabel(a)
                     )+
                 '</span>'
             );
 
             if(
-                anime.episodes&&
-                anime.episodes.aired
+                a.episodes&&
+                a.episodes.aired
             ){
-                meta.append(
+                m.append(
                     '<span class="ah-chip">'+
                         esc(
-                            episodeCount(
-                                anime
-                            )
+                            epCount(a)
                         )+
                         ' сер.'+
                     '</span>'
                 );
             }
 
-            if(
-                anime.status&&
-                anime.status.alias
-            ){
-                meta.append(
-                    '<span class="ah-chip hot">'+
-                        esc(
-                            statusLabel(
-                                anime.status.alias
-                            )
-                        )+
-                    '</span>'
-                );
-            }
+            c.append(
+                m,
 
-            content.append(
-                meta,
-
-                '<div class="ah-hero-desc">'+
+                '<div class="ah-description">'+
                     esc(
                         clip(
-                            cleanDescription(
-                                anime.description
+                            desc(
+                                a.description
                             ),
-                            330
+                            285
                         )||
-                        'Описание появится после открытия карточки.'
+                        'Откройте карточку для подробностей.'
                     )+
                 '</div>'
             );
 
-            var actions=
+            var acts=
                 $('<div class="ah-actions"></div>');
 
             $(
-                '<div class="ah-action primary selector">'+
+                '<div class="ah-button primary selector">'+
                     '▶ Смотреть'+
                 '</div>'
             )
             .on(
-                'hover:enter',
+                'hover:enter click',
 
-                function(){
-                    watchAnime(
-                        anime
-                    );
+                function(e){
+                    if(e){
+                        e.preventDefault();
+                    }
+
+                    watchAnime(a);
                 }
             )
-            .appendTo(actions);
+            .appendTo(acts);
 
             $(
-                '<div class="ah-action selector">'+
+                '<div class="ah-button selector">'+
                     'ⓘ Подробнее'+
                 '</div>'
             )
             .on(
-                'hover:enter',
+                'hover:enter click',
 
-                function(){
-                    openDetail(
-                        anime
-                    );
+                function(e){
+                    if(e){
+                        e.preventDefault();
+                    }
+
+                    openDetail(a);
                 }
             )
-            .appendTo(actions);
+            .appendTo(acts);
 
-            content.append(actions);
-            hero.append(content);
-            root.append(hero);
+            c.append(acts);
+            h.append(c);
+            root.append(h);
         }
 
+        /*
+         * Maximum:
+         * Continue + 3 rails.
+         * 7 cards each.
+         */
         continueShelf(root);
 
         shelf(
             root,
             'Сейчас выходит',
-            data.ongoing||
-            []
-        );
-
-        shelf(
-            root,
-            'Текущий сезон',
-            data.season||
+            d.ongoing||
             []
         );
 
         shelf(
             root,
             'Новинки',
-            data.latest||
+            d.latest||
             []
         );
 
         shelf(
             root,
             'Лучшее',
-            data.top||
-            []
-        );
-
-        shelf(
-            root,
-            'Анонсы',
-            data.announcements||
+            d.top||
             []
         );
 
@@ -4748,21 +4529,19 @@ function HomeComponent(){
 
         setTimeout(
             function(){
-
-                var first=
+                var f=
                     root.find(
-                        '.ah-action.selector'
+                        '.ah-button.selector'
                     )[0]||
                     root.find(
                         '.selector'
                     )[0];
 
-                if(first){
-                    nav.focus(first);
+                if(f){
+                    nav.focus(f);
                 }
             },
-
-            50
+            30
         );
     }
 
@@ -4777,13 +4556,13 @@ function HomeComponent(){
                 function(){}
             ),
 
-            loaderHtml(
+            loader(
                 'Загрузка AnimeHub…'
             )
         );
 
         nav=
-            makeNav(
+            navFor(
                 root,
                 view,
 
@@ -4800,19 +4579,16 @@ function HomeComponent(){
                 }
             );
 
-        net.timeout(
-            20000
-        );
-
         requestCached(
             net,
             'home',
-            180000,
-            workerUrl('home'),
+            120000,
+            workerUrl(
+                'home'
+            ),
             render,
 
             function(){
-
                 root.html(
                     '<div class="ah-empty">'+
                         'Не удалось загрузить AnimeHub'+
@@ -4829,7 +4605,7 @@ function HomeComponent(){
             Lampa.Activity.active().activity===
             this.activity
         ){
-            installController(
+            controller(
                 view,
                 root,
                 nav,
@@ -4850,16 +4626,19 @@ function HomeComponent(){
 
     this.destroy=function(){
         alive=false;
+
         net.clear();
+
         view.remove();
     };
 }
+
 
 /* ============================================================
  * CATALOG
  * ============================================================ */
 
-function CatalogComponent(object){
+function CatalogComponent(o){
     var net=
         new Lampa.Reguest();
 
@@ -4874,48 +4653,55 @@ function CatalogComponent(object){
     var nav;
 
     var mode=
-        object.ah_mode||
+        o.ah_mode||
         'all';
 
     var value=
-        object.ah_value||
+        o.ah_value||
         '';
 
     var title=
-        object.ah_title||
+        o.ah_title||
         'Каталог';
 
     var page=
         intv(
-            object.ah_page,
+            o.ah_page,
             1
         );
 
-    function filterButton(
+    function filter(
         side,
         key,
         label,
         action
     ){
-        var button=
+        var b=
             $('<div class="ah-filter selector"></div>')
             .text(label);
 
         if(mode===key){
-            button.addClass(
+            b.addClass(
                 'selected'
             );
         }
 
-        button.on(
-            'hover:enter',
-            action
+        b.on(
+            'hover:enter click',
+
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
+
+                action();
+            }
         );
 
-        side.append(button);
+        side.append(b);
     }
 
-    function render(data){
+    function render(d){
         if(!alive){
             return;
         }
@@ -4927,34 +4713,32 @@ function CatalogComponent(object){
                     mode==='search'
                         ?'search'
                         :'catalog'
-                )
+                ),
+
+                '<div class="ah-head">'+
+                    '<div class="ah-page-title">'+
+                        esc(title)+
+                    '</div>'+
+                    '<div class="ah-page-sub">'+
+                        'Страница '+
+                        page+
+                        ' • '+
+                        (
+                            d.items||
+                            []
+                        ).length+
+                        ' тайтлов'+
+                    '</div>'+
+                '</div>'
             );
 
-        root.append(
-            '<div class="ah-section-head">'+
-                '<div class="ah-page-title">'+
-                    esc(title)+
-                '</div>'+
-                '<div class="ah-page-sub">'+
-                    'Страница '+
-                    page+
-                    ' • '+
-                    (
-                        data.items||
-                        []
-                    ).length+
-                    ' тайтлов'+
-                '</div>'+
-            '</div>'
-        );
-
-        var layout=
-            $('<div class="ah-catalog-layout"></div>');
+        var lay=
+            $('<div class="ah-catalog"></div>');
 
         var side=
-            $('<div class="ah-filter-sidebar"></div>');
+            $('<div class="ah-side"></div>');
 
-        filterButton(
+        filter(
             side,
             'all',
             'Все аниме',
@@ -4969,7 +4753,7 @@ function CatalogComponent(object){
             }
         );
 
-        filterButton(
+        filter(
             side,
             'ongoing',
             'Онгоинги',
@@ -4984,7 +4768,7 @@ function CatalogComponent(object){
             }
         );
 
-        filterButton(
+        filter(
             side,
             'popular',
             'Популярные',
@@ -4999,7 +4783,7 @@ function CatalogComponent(object){
             }
         );
 
-        filterButton(
+        filter(
             side,
             'top',
             'Топ-100',
@@ -5014,7 +4798,7 @@ function CatalogComponent(object){
             }
         );
 
-        filterButton(
+        filter(
             side,
             'latest',
             'Новинки',
@@ -5029,7 +4813,7 @@ function CatalogComponent(object){
             }
         );
 
-        filterButton(
+        filter(
             side,
             'announcements',
             'Анонсы',
@@ -5044,21 +4828,21 @@ function CatalogComponent(object){
             }
         );
 
-        filterButton(
+        filter(
             side,
             'genre',
             'Жанры',
             chooseGenre
         );
 
-        filterButton(
+        filter(
             side,
             'year',
             'Годы',
             chooseYear
         );
 
-        filterButton(
+        filter(
             side,
             'type',
             'Тип',
@@ -5066,20 +4850,22 @@ function CatalogComponent(object){
         );
 
         var main=
-            $('<div class="ah-catalog-main"></div>');
+            $('<div class="ah-main"></div>');
 
         var grid=
             $('<div class="ah-grid"></div>');
 
         (
-            data.items||
+            d.items||
             []
         )
-        .forEach(function(anime){
-            grid.append(
-                posterCard(anime)
-            );
-        });
+        .forEach(
+            function(a){
+                grid.append(
+                    posterCard(a)
+                );
+            }
+        );
 
         main.append(grid);
 
@@ -5089,12 +4875,12 @@ function CatalogComponent(object){
         if(page>1){
             $(
                 '<div class="ah-pagebtn selector">'+
-                    '← Страница '+
+                    '← '+
                     (page-1)+
                 '</div>'
             )
             .on(
-                'hover:enter',
+                'hover:enter click',
 
                 function(){
                     openCatalog(
@@ -5108,16 +4894,15 @@ function CatalogComponent(object){
             .appendTo(pages);
         }
 
-        if(data.hasNext){
+        if(d.hasNext){
             $(
                 '<div class="ah-pagebtn selector">'+
-                    'Страница '+
                     (page+1)+
                     ' →'+
                 '</div>'
             )
             .on(
-                'hover:enter',
+                'hover:enter click',
 
                 function(){
                     openCatalog(
@@ -5133,35 +4918,30 @@ function CatalogComponent(object){
 
         main.append(pages);
 
-        layout.append(
-            side,
-            main
+        root.append(
+            lay.append(
+                side,
+                main
+            )
         );
-
-        root.append(layout);
 
         nav.bind();
 
         setTimeout(
             function(){
-
-                var first=
+                var f=
                     grid.find(
                         '.selector'
                     )[0]||
                     side.find(
                         '.selector'
-                    )[0]||
-                    root.find(
-                        '.selector'
                     )[0];
 
-                if(first){
-                    nav.focus(first);
+                if(f){
+                    nav.focus(f);
                 }
             },
-
-            40
+            25
         );
     }
 
@@ -5172,18 +4952,16 @@ function CatalogComponent(object){
 
         root.append(
             topbar(
-                mode==='search'
-                    ?'search'
-                    :'catalog'
+                'catalog'
             ),
 
-            loaderHtml(
+            loader(
                 'Загрузка каталога…'
             )
         );
 
         nav=
-            makeNav(
+            navFor(
                 root,
                 view,
 
@@ -5203,14 +4981,14 @@ function CatalogComponent(object){
         requestCached(
             net,
 
-            'catalog:'+
+            'cat:'+
             mode+
             ':'+
             value+
             ':'+
             page,
 
-            120000,
+            90000,
 
             workerUrl(
                 'catalog',
@@ -5219,7 +4997,7 @@ function CatalogComponent(object){
                     mode:mode,
                     value:value,
                     page:page,
-                    limit:24
+                    limit:12
                 }
             ),
 
@@ -5242,7 +5020,7 @@ function CatalogComponent(object){
             Lampa.Activity.active().activity===
             this.activity
         ){
-            installController(
+            controller(
                 view,
                 root,
                 nav,
@@ -5268,11 +5046,12 @@ function CatalogComponent(object){
     };
 }
 
+
 /* ============================================================
  * DETAIL
  * ============================================================ */
 
-function DetailComponent(object){
+function DetailComponent(o){
     var net=
         new Lampa.Reguest();
 
@@ -5287,53 +5066,58 @@ function DetailComponent(object){
     var nav;
 
     var initial=
-        object.ah_item||
+        o.ah_item||
         {};
 
     var anime=null;
     var videos=null;
-    var episodeBox=null;
-    var watchButton=null;
-    var recBox=null;
+    var epBox=null;
+    var watchBtn=null;
+    var recs=null;
+    var timers=[];
 
-    function infoPanel(a){
-        var panel=
+    function row(
+        panel,
+        k,
+        v
+    ){
+        if(
+            v!==''&&
+            v!==null&&
+            v!==undefined
+        ){
+            panel.append(
+                '<div class="ah-info">'+
+                    '<span>'+
+                        esc(k)+
+                    '</span>'+
+                    '<span>'+
+                        esc(v)+
+                    '</span>'+
+                '</div>'
+            );
+        }
+    }
+
+    function aside(a){
+        var p=
             $(
-                '<div class="ah-detail-aside">'+
-                    '<div class="ah-detail-aside-title">'+
+                '<div class="ah-aside">'+
+                    '<div class="ah-aside-title">'+
                         'Информация'+
                     '</div>'+
                 '</div>'
             );
 
-        function row(k,v){
-            if(
-                v!==''&&
-                v!==null&&
-                v!==undefined
-            ){
-                panel.append(
-                    '<div class="ah-info-row">'+
-                        '<span class="ah-info-label">'+
-                            esc(k)+
-                        '</span>'+
-                        '<span class="ah-info-value">'+
-                            esc(v)+
-                        '</span>'+
-                    '</div>'
-                );
-            }
-        }
-
         row(
+            p,
             'Рейтинг',
 
             num(
-                a.score,
-                0
+                a.score
             )>0
                 ?'★ '+
-                formatScore(
+                score(
                     a.score
                 )
                 :'—'
@@ -5344,10 +5128,10 @@ function DetailComponent(object){
             a.studios.length
         ){
             row(
+                p,
                 'Студия',
 
                 a.studios
-                    .slice(0,2)
                     .map(
                         function(x){
                             return x.title;
@@ -5362,10 +5146,10 @@ function DetailComponent(object){
             a.creators.length
         ){
             row(
+                p,
                 'Режиссёр',
 
                 a.creators
-                    .slice(0,2)
                     .map(
                         function(x){
                             return x.title;
@@ -5376,26 +5160,30 @@ function DetailComponent(object){
         }
 
         row(
+            p,
             'Тип',
             typeLabel(a)
         );
 
         row(
+            p,
             'Статус',
 
-            statusLabel(
+            status(
                 a.status&&
                 a.status.alias
             )
         );
 
         row(
+            p,
             'Эпизоды',
-            episodeCount(a)
+            epCount(a)
         );
 
         if(a.duration){
             row(
+                p,
                 'Длительность',
                 a.duration+
                 ' мин.'
@@ -5407,6 +5195,7 @@ function DetailComponent(object){
             a.age.title
         ){
             row(
+                p,
                 'Возраст',
                 a.age.title
             );
@@ -5417,6 +5206,7 @@ function DetailComponent(object){
             a.episodes.nextDate
         ){
             row(
+                p,
                 'Следующая',
 
                 formatDate(
@@ -5426,68 +5216,61 @@ function DetailComponent(object){
             );
         }
 
-        return panel;
+        return p;
     }
 
     function refreshWatch(){
         if(
-            !watchButton||
+            !watchBtn||
             !anime
         ){
             return;
         }
 
-        var state=
-            watchState(anime);
+        var st=
+            watch(anime);
 
-        var episode=
+        var ep=
             num(
-                state.episode,
-                0
+                st.episode
             );
 
-        watchButton.text(
-            episode&&
-            !state.completed
+        watchBtn.text(
+            ep&&
+            !st.completed
                 ?(
                     '▶ Продолжить • серия '+
-                    episode
+                    ep
                 )
-                :episode&&
-                state.completed
+                :ep&&
+                st.completed
                     ?'▶ Смотреть дальше'
                     :'▶ Смотреть'
         );
     }
 
-    function screenshotForEpisode(
-        a,
-        episode,
+    function shotFor(
+        ep,
         index
     ){
-        var screenshots=
-            a.screenshots||
+        var shots=
+            anime.screenshots||
             [];
 
         var exact=null;
 
-        screenshots.some(
-            function(s){
-
+        shots.some(
+            function(x){
                 if(
                     Math.abs(
                         num(
-                            s.episode,
-                            0
+                            x.episode
                         )-
-                        num(
-                            episode,
-                            0
-                        )
+                        num(ep)
                     )<
                     .0001
                 ){
-                    exact=s;
+                    exact=x;
                     return true;
                 }
 
@@ -5495,26 +5278,26 @@ function DetailComponent(object){
             }
         );
 
-        var pick=
+        var p=
             exact||
             (
-                screenshots.length
-                    ?screenshots[
+                shots.length
+                    ?shots[
                         index%
-                        screenshots.length
+                        shots.length
                     ]
                     :null
             );
 
-        return pick
+        return p
             ?(
-                pick.small||
-                pick.full
+                p.small||
+                p.full
             )
             :(
-                a.background||
-                a.posterHero||
-                a.poster||
+                anime.background||
+                anime.posterHero||
+                anime.poster||
                 ''
             );
     }
@@ -5524,131 +5307,114 @@ function DetailComponent(object){
             list||
             [];
 
-        var episodes=
-            availableEpisodes(
+        var eps=
+            episodeNumbers(
                 videos
             );
 
-        if(!episodes.length){
-            episodeBox.html(
+        if(!eps.length){
+            epBox.html(
                 '<div class="ah-placeholder">'+
-                    'Нет поддерживаемых прямых источников для этого тайтла.'+
+                    'Видео пока не найдено.'+
                 '</div>'
             );
 
             return;
         }
 
-        var state=
-            watchState(anime);
+        var st=
+            watch(anime);
 
         var current=
             num(
-                state.episode,
-                0
+                st.episode
             );
 
-        var currentIndex=
-            episodes.indexOf(
+        var idx=
+            eps.indexOf(
                 current
             );
 
         var start=0;
-        var max=18;
+        var max=8;
 
         if(
-            episodes.length>max&&
-            currentIndex>=0
+            eps.length>max&&
+            idx>=0
         ){
             start=
                 Math.max(
                     0,
+
                     Math.min(
-                        episodes.length-
+                        eps.length-
                         max,
-                        currentIndex-
-                        6
+
+                        idx-
+                        3
                     )
                 );
         }
 
         var subset=
-            episodes.slice(
+            eps.slice(
                 start,
                 start+
                 max
             );
 
-        var label=
-            episodes.length>max
-                ?(
-                    start+
-                    1
-                )+
-                '–'+
-                (
-                    start+
-                    subset.length
-                )+
-                ' из '+
-                episodes.length
-                :String(
-                    episodes.length
-                );
-
         var head=
             $(
-                '<div class="ah-episodes-head">'+
-                    '<div class="ah-episodes-title-wrap">'+
-                        '<div class="ah-episodes-title">'+
+                '<div class="ah-ephead">'+
+                    '<div>'+
+                        '<span class="ah-eptitle">'+
                             'Эпизоды'+
-                        '</div>'+
-                        '<div class="ah-episodes-count">'+
-                            esc(label)+
-                        '</div>'+
+                        '</span>'+
+                        '<span class="ah-epcount">'+
+                            esc(
+                                eps.length>max
+                                    ?(
+                                        start+
+                                        1
+                                    )+
+                                    '–'+
+                                    (
+                                        start+
+                                        subset.length
+                                    )+
+                                    ' из '+
+                                    eps.length
+                                    :eps.length
+                            )+
+                        '</span>'+
                     '</div>'+
                 '</div>'
             );
 
         var all=
             $(
-                '<div class="ah-all-episodes selector">'+
+                '<div class="ah-all selector">'+
                     'Все серии ›'+
                 '</div>'
             );
 
         all.on(
-            'hover:enter',
+            'hover:enter click',
 
-            function(){
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
 
-                showSelect(
+                selectBox(
                     'Эпизоды',
 
-                    episodes.map(
+                    eps.map(
                         function(ep){
-
-                            var suffix=
-                                Math.abs(
-                                    num(
-                                        state.episode,
-                                        0
-                                    )-
-                                    ep
-                                )<
-                                .0001
-                                    ?(
-                                        state.completed
-                                            ?' • просмотрено'
-                                            :' • продолжить'
-                                    )
-                                    :'';
-
                             return {
                                 title:
                                     'Серия '+
-                                    ep+
-                                    suffix,
+                                    ep,
 
                                 episode:
                                     ep
@@ -5656,12 +5422,16 @@ function DetailComponent(object){
                         }
                     ),
 
-                    function(item){
-
-                        watchAnime(
-                            anime,
-                            videos,
-                            item.episode
+                    function(x){
+                        setTimeout(
+                            function(){
+                                playEpisode(
+                                    anime,
+                                    videos,
+                                    x.episode
+                                );
+                            },
+                            0
                         );
                     }
                 );
@@ -5670,75 +5440,55 @@ function DetailComponent(object){
 
         head.append(all);
 
-        var track=
-            $('<div class="ah-episode-track"></div>');
+        var line=
+            $('<div class="ah-eprow"></div>');
 
         subset.forEach(
-            function(ep,index){
-
-                var groups=
-                    groupVideos(
-                        videos
-                    )
-                    .filter(
-                        function(group){
-                            return !!findVideo(
-                                group,
-                                ep
-                            );
-                        }
-                    );
-
-                var card=
-                    $('<div class="ah-episode-card selector"></div>');
-
-                if(
-                    Math.abs(
-                        current-
+            function(ep,j){
+                var gs=
+                    groupsForEpisode(
+                        videos,
                         ep
-                    )<
-                    .0001
-                ){
-                    card.addClass(
-                        'current'
                     );
-                }
 
-                var image=
-                    screenshotForEpisode(
-                        anime,
+                var c=
+                    $('<div class="ah-ep selector"></div>');
+
+                var im=
+                    shotFor(
                         ep,
                         start+
-                        index
+                        j
                     );
 
-                if(image){
-                    $('<img alt="">')
-                        .attr({
-                            src:image,
-                            loading:'lazy'
-                        })
-                        .appendTo(card);
+                if(im){
+                    putImage(
+                        c,
+                        im,
+                        'Серия '+
+                        ep,
+                        false
+                    );
                 }
 
-                card.append(
-                    '<div class="ah-episode-shade"></div>'+
-                    '<div class="ah-episode-number">'+
+                c.append(
+                    '<div class="ah-cardshade"></div>'+
+                    '<div class="ah-epnum">'+
                         esc(ep)+
                     '</div>'+
-                    '<div class="ah-episode-copy">'+
-                        '<div class="ah-episode-name">'+
+                    '<div class="ah-epcopy">'+
+                        '<div class="ah-epname">'+
                             'Серия '+
                             esc(ep)+
                         '</div>'+
-                        '<div class="ah-episode-meta">'+
+                        '<div class="ah-epmeta">'+
                             esc(
-                                groups.length+
+                                gs.length+
                                 ' источн.'+
                                 (
-                                    groups[0]
+                                    gs[0]
                                         ?' • '+
-                                        groups[0].dubbing
+                                        gs[0].title
                                         :''
                                 )
                             )+
@@ -5749,66 +5499,56 @@ function DetailComponent(object){
                 if(
                     Math.abs(
                         current-
-                        ep
-                    )<
-                    .0001&&
-                    state.completed
-                ){
-                    card.append(
-                        '<div class="ah-episode-progress">'+
-                            '<span style="width:100%"></span>'+
-                        '</div>'
-                    );
-                }
-                else if(
-                    Math.abs(
-                        current-
-                        ep
+                        num(ep)
                     )<
                     .0001&&
                     num(
-                        state.duration,
-                        0
+                        st.duration
                     )>0&&
                     num(
-                        state.position,
-                        0
+                        st.position
                     )>0
                 ){
-                    var progress=
-                        Math.max(
-                            0,
-                            Math.min(
-                                100,
-                                Math.round(
-                                    num(
-                                        state.position,
-                                        0
-                                    )/
-                                    num(
-                                        state.duration,
-                                        1
-                                    )*
-                                    100
-                                )
-                            )
-                        );
+                    var p=
+                        st.completed
+                            ?100
+                            :Math.max(
+                                0,
 
-                    card.append(
-                        '<div class="ah-episode-progress">'+
+                                Math.min(
+                                    100,
+
+                                    Math.round(
+                                        num(
+                                            st.position
+                                        )/
+                                        num(
+                                            st.duration,
+                                            1
+                                        )*
+                                        100
+                                    )
+                                )
+                            );
+
+                    c.append(
+                        '<div class="ah-progress">'+
                             '<span style="width:'+
-                                progress+
+                                p+
                                 '%"></span>'+
                         '</div>'
                     );
                 }
 
-                card.on(
-                    'hover:enter',
+                c.on(
+                    'hover:enter click',
 
-                    function(){
+                    function(e){
+                        if(e){
+                            e.preventDefault();
+                        }
 
-                        watchAnime(
+                        playEpisode(
                             anime,
                             videos,
                             ep
@@ -5816,15 +5556,15 @@ function DetailComponent(object){
                     }
                 );
 
-                track.append(card);
+                line.append(c);
             }
         );
 
-        episodeBox
+        epBox
             .empty()
             .append(
                 head,
-                track
+                line
             );
 
         nav.bind();
@@ -5832,50 +5572,12 @@ function DetailComponent(object){
         refreshWatch();
     }
 
-    function loadInline(){
-        episodeBox.html(
-            '<div class="ah-episodes-head">'+
-                '<div class="ah-episodes-title">'+
-                    'Эпизоды'+
-                '</div>'+
-            '</div>'+
-            '<div class="ah-placeholder">'+
-                '<div class="ah-mini-spinner"></div>'+
-                'Загружаем серии и озвучки…'+
-            '</div>'
-        );
-
-        loadVideos(
-            anime,
-
-            function(list){
-                if(alive){
-                    renderEpisodes(
-                        list
-                    );
-                }
-            },
-
-            function(){
-                if(alive){
-                    episodeBox.html(
-                        '<div class="ah-placeholder">'+
-                            'Не удалось загрузить серии.'+
-                        '</div>'
-                    );
-                }
-            },
-
-            false
-        );
-    }
-
-    function loadRecommendations(){
-        var request=
+    function loadRecs(){
+        var r=
             new Lampa.Reguest();
 
         requestCached(
-            request,
+            r,
 
             'rec:'+
             anime.id,
@@ -5890,37 +5592,35 @@ function DetailComponent(object){
                 }
             ),
 
-            function(data){
-
+            function(d){
                 if(!alive){
                     return;
                 }
 
-                var items=
-                    data.items||
-                    [];
-
-                if(items.length){
-                    recBox.empty();
+                if(
+                    d.items&&
+                    d.items.length
+                ){
+                    recs.empty();
 
                     shelf(
-                        recBox,
+                        recs,
                         'Похожие аниме',
-                        items
+                        d.items
                     );
 
                     nav.bind();
                 }
 
                 try{
-                    request.clear();
+                    r.clear();
                 }
                 catch(e){}
             },
 
             function(){
                 try{
-                    request.clear();
+                    r.clear();
                 }
                 catch(e){}
             }
@@ -5933,9 +5633,8 @@ function DetailComponent(object){
         }
 
         anime=a;
-        videos=null;
 
-        saveRecent(a);
+        recent(a);
 
         root
             .empty()
@@ -5944,34 +5643,27 @@ function DetailComponent(object){
             );
 
         var hero=
-            $('<div class="ah-detail-hero"></div>');
+            $('<div class="ah-detail"></div>');
 
-        var background=
+        var bg=
             a.background||
             a.posterHero||
             a.poster||
             '';
 
-        if(background){
-            $('<img class="ah-detail-bg" alt="">')
-                .attr(
-                    'src',
-                    background
-                )
-                .addClass(
-                    a.background
-                        ?''
-                        :'ah-poster-bg'
-                )
-                .appendTo(hero);
+        if(bg){
+            putBackground(
+                hero,
+                bg
+            );
         }
 
         hero.append(
-            '<div class="ah-detail-shade"></div>'
+            '<div class="ah-shade"></div>'
         );
 
-        var content=
-            $('<div class="ah-detail-content"></div>');
+        var wrap=
+            $('<div class="ah-detail-copywrap"></div>');
 
         var poster=
             $('<div class="ah-detail-poster"></div>');
@@ -5980,13 +5672,14 @@ function DetailComponent(object){
             poster,
             a.posterDetail||
             a.poster,
-            a.title
+            a.title,
+            true
         );
 
-        var copy=
-            $('<div class="ah-detail-copy"></div>');
+        var main=
+            $('<div class="ah-detail-main"></div>');
 
-        copy.append(
+        main.append(
             '<div class="ah-kicker">'+
                 'AnimeHub • YummyAnime'+
             '</div>'+
@@ -6003,8 +5696,8 @@ function DetailComponent(object){
             a.original!==
             a.title
         ){
-            copy.append(
-                '<div class="ah-original-title">'+
+            main.append(
+                '<div class="ah-original">'+
                     esc(
                         a.original
                     )+
@@ -6017,15 +5710,14 @@ function DetailComponent(object){
 
         if(
             num(
-                a.score,
-                0
+                a.score
             )>0
         ){
             meta.append(
-                '<span class="ah-chip score">'+
+                '<span class="ah-chip ah-score">'+
                     '★ '+
                     esc(
-                        formatScore(
+                        score(
                             a.score
                         )
                     )+
@@ -6056,9 +5748,9 @@ function DetailComponent(object){
             a.status.alias
         ){
             meta.append(
-                '<span class="ah-chip hot">'+
+                '<span class="ah-chip">'+
                     esc(
-                        statusLabel(
+                        status(
                             a.status.alias
                         )
                     )+
@@ -6066,26 +5758,13 @@ function DetailComponent(object){
             );
         }
 
-        if(
-            a.age&&
-            a.age.title
-        ){
-            meta.append(
-                '<span class="ah-chip">'+
-                    esc(
-                        a.age.title
-                    )+
-                '</span>'
-            );
-        }
-
-        copy.append(meta);
+        main.append(meta);
 
         if(
             a.studios&&
             a.studios.length
         ){
-            copy.append(
+            main.append(
                 '<div class="ah-studio">'+
                     'Студия: '+
                     esc(
@@ -6101,7 +5780,7 @@ function DetailComponent(object){
             );
         }
 
-        var genres=
+        var gm=
             $('<div class="ah-meta"></div>');
 
         (
@@ -6110,34 +5789,35 @@ function DetailComponent(object){
         )
         .slice(
             0,
-            7
+            6
         )
-        .forEach(function(g){
+        .forEach(
+            function(g){
+                gm.append(
+                    '<span class="ah-chip">'+
+                        esc(
+                            g.title
+                        )+
+                    '</span>'
+                );
+            }
+        );
 
-            genres.append(
-                '<span class="ah-chip">'+
-                    esc(
-                        g.title
-                    )+
-                '</span>'
-            );
-        });
+        main.append(gm);
 
-        copy.append(genres);
-
-        var description=
-            cleanDescription(
+        var text=
+            desc(
                 a.description||
                 ''
             );
 
-        copy.append(
-            '<div class="ah-detail-desc">'+
+        main.append(
+            '<div class="ah-description">'+
                 esc(
-                    description
+                    text
                         ?clip(
-                            description,
-                            650
+                            text,
+                            520
                         )
                         :'Описание пока отсутствует.'
                 )+
@@ -6147,12 +5827,20 @@ function DetailComponent(object){
         var actions=
             $('<div class="ah-actions"></div>');
 
-        watchButton=
-            $('<div class="ah-action primary selector"></div>')
+        watchBtn=
+            $(
+                '<div class="ah-button primary selector">'+
+                    '▶ Смотреть'+
+                '</div>'
+            )
             .on(
-                'hover:enter',
+                'hover:enter click',
 
-                function(){
+                function(e){
+                    if(e){
+                        e.preventDefault();
+                    }
+
                     watchAnime(
                         anime,
                         videos
@@ -6160,60 +5848,62 @@ function DetailComponent(object){
                 }
             );
 
-        var favourite=
-            $('<div class="ah-action selector"></div>');
+        var fav=
+            $('<div class="ah-button selector"></div>');
 
-        function refreshFavourite(){
-            favourite.text(
-                isFavorite(anime)
+        function rf(){
+            fav.text(
+                isFav(anime)
                     ?'★ В избранном'
                     :'☆ В избранное'
             );
         }
 
-        refreshFavourite();
+        rf();
 
-        favourite.on(
-            'hover:enter',
+        fav.on(
+            'hover:enter click',
 
-            function(){
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
 
                 notify(
-                    toggleFavorite(
-                        anime
-                    )
+                    toggleFav(anime)
                         ?'Добавлено в избранное'
                         :'Удалено из избранного'
                 );
 
-                refreshFavourite();
+                rf();
             }
         );
 
         actions.append(
-            watchButton,
-            favourite
+            watchBtn,
+            fav
         );
 
-        copy.append(actions);
+        main.append(actions);
 
-        refreshWatch();
-
-        content.append(
+        wrap.append(
             poster,
-            copy,
-            infoPanel(a)
+            main,
+            aside(a)
         );
 
-        hero.append(content);
+        hero.append(wrap);
 
         root.append(hero);
 
-        episodeBox=
-            $('<div class="ah-episodes-section"></div>');
+        epBox=
+            $('<div class="ah-shelf"></div>');
 
-        root.append(episodeBox);
+        root.append(epBox);
 
+        /*
+         * Only 4 screenshots now.
+         */
         if(
             a.screenshots&&
             a.screenshots.length
@@ -6224,88 +5914,134 @@ function DetailComponent(object){
                 '</div>'
             );
 
-            var screenshots=
-                $('<div class="ah-screens"></div>');
+            var shots=
+                $('<div class="ah-shots"></div>');
 
             a.screenshots
                 .slice(
                     0,
-                    8
+                    4
                 )
                 .forEach(
-                    function(s){
-
-                        var box=
-                            $('<div class="ah-screen"></div>');
+                    function(x){
+                        var b=
+                            $('<div class="ah-shot"></div>');
 
                         putImage(
-                            box,
-                            s.full||
-                            s.small,
-                            'Кадр'
+                            b,
+                            x.full||
+                            x.small,
+                            'Кадр',
+                            false
                         );
 
-                        screenshots.append(box);
+                        shots.append(b);
                     }
                 );
 
-            root.append(
-                screenshots
-            );
+            root.append(shots);
         }
 
         if(
-            description.length>
-            650
+            text.length>
+            520
         ){
             root.append(
                 '<div class="ah-block-title">'+
                     'Описание'+
                 '</div>'+
-                '<div class="ah-description-panel">'+
-                    esc(description)+
+                '<div class="ah-longdesc">'+
+                    esc(text)+
                 '</div>'
             );
         }
 
-        if(
-            a.viewingOrder&&
-            a.viewingOrder.length
-        ){
-            shelf(
-                root,
-                'Франшиза / порядок просмотра',
-                a.viewingOrder
-            );
-        }
-
-        recBox=
+        recs=
             $('<div></div>');
 
-        root.append(recBox);
+        root.append(recs);
 
+        refreshWatch();
         nav.bind();
 
         setTimeout(
             function(){
-
-                var first=
+                var f=
                     root.find(
-                        '.ah-action.selector'
+                        '.ah-button.selector'
                     )[0]||
                     root.find(
                         '.selector'
                     )[0];
 
-                if(first){
-                    nav.focus(first);
+                if(f){
+                    nav.focus(f);
                 }
-
-                loadInline();
-                loadRecommendations();
             },
+            20
+        );
 
-            55
+        /*
+         * Do not hit /videos at the same moment
+         * the detail artwork is being decoded.
+         */
+        timers.push(
+            setTimeout(
+                function(){
+                    if(!alive){
+                        return;
+                    }
+
+                    epBox.html(
+                        '<div class="ah-eptitle">'+
+                            'Эпизоды'+
+                        '</div>'+
+                        '<div class="ah-placeholder">'+
+                            '<div class="ah-spinner"></div>'+
+                            'Загружаем серии…'+
+                        '</div>'
+                    );
+
+                    loadVideos(
+                        anime,
+
+                        function(v){
+                            if(alive){
+                                renderEpisodes(v);
+                            }
+                        },
+
+                        function(){
+                            if(alive){
+                                epBox.html(
+                                    '<div class="ah-placeholder">'+
+                                        'Не удалось загрузить серии.'+
+                                    '</div>'
+                                );
+                            }
+                        },
+
+                        false
+                    );
+                },
+                300
+            )
+        );
+
+        /*
+         * Recommendations are intentionally delayed.
+         * They are not allowed to compete with the hero/videos
+         * during the initial TV render.
+         */
+        timers.push(
+            setTimeout(
+                function(){
+                    if(alive){
+                        loadRecs();
+                    }
+                },
+                1400
+            )
         );
     }
 
@@ -6317,13 +6053,13 @@ function DetailComponent(object){
         root.append(
             topbar(''),
 
-            loaderHtml(
+            loader(
                 'Загрузка карточки…'
             )
         );
 
         nav=
-            makeNav(
+            navFor(
                 root,
                 view,
 
@@ -6347,27 +6083,26 @@ function DetailComponent(object){
                 ''
             ),
 
-            600000,
+            480000,
 
             workerUrl(
                 'anime',
-
                 {
                     id:
                         initial.id
                 }
             ),
 
-            function(data){
+            function(d){
                 render(
-                    data.anime
+                    d.anime
                 );
             },
 
             function(){
                 root.html(
                     '<div class="ah-empty">'+
-                        'Не удалось загрузить карточку аниме'+
+                        'Не удалось загрузить карточку'+
                     '</div>'
                 );
             }
@@ -6384,7 +6119,7 @@ function DetailComponent(object){
             return;
         }
 
-        installController(
+        controller(
             view,
             root,
             nav,
@@ -6394,15 +6129,7 @@ function DetailComponent(object){
             }
         );
 
-        if(anime){
-            refreshWatch();
-
-            if(videos){
-                renderEpisodes(
-                    videos
-                );
-            }
-        }
+        refreshWatch();
     };
 
     this.pause=function(){};
@@ -6414,10 +6141,17 @@ function DetailComponent(object){
 
     this.destroy=function(){
         alive=false;
+
+        timers.forEach(
+            clearTimeout
+        );
+
         net.clear();
+
         view.remove();
     };
 }
+
 
 /* ============================================================
  * SCHEDULE
@@ -6437,32 +6171,7 @@ function ScheduleComponent(){
 
     var nav;
 
-    function dayKey(ts){
-        if(!ts){
-            return 'Без даты';
-        }
-
-        try{
-            return new Date(
-                ts*
-                1000
-            )
-            .toLocaleDateString(
-                'ru-RU',
-
-                {
-                    weekday:'long',
-                    day:'numeric',
-                    month:'long'
-                }
-            );
-        }
-        catch(e){
-            return 'Без даты';
-        }
-    }
-
-    function render(data){
+    function render(d){
         if(!alive){
             return;
         }
@@ -6472,163 +6181,99 @@ function ScheduleComponent(){
             .append(
                 topbar(
                     'schedule'
-                )
+                ),
+
+                '<div class="ah-head">'+
+                    '<div class="ah-page-title">'+
+                        'Расписание'+
+                    '</div>'+
+                    '<div class="ah-page-sub">'+
+                        'Ближайшие выходы серий'+
+                    '</div>'+
+                '</div>'
             );
 
-        root.append(
-            '<div class="ah-section-head">'+
-                '<div class="ah-page-title">'+
-                    'Расписание'+
-                '</div>'+
-                '<div class="ah-page-sub">'+
-                    'Ближайшие выходы серий'+
-                '</div>'+
-            '</div>'
-        );
-
-        var groups={};
+        var grid=
+            $('<div class="ah-schgrid"></div>');
 
         (
-            data.items||
+            d.items||
             []
+        )
+        .slice(
+            0,
+            20
         )
         .forEach(
             function(a){
+                var c=
+                    $('<div class="ah-sch selector"></div>');
 
-                var key=
-                    dayKey(
-                        a.episodes&&
-                        a.episodes.nextDate
+                var bg=
+                    a.posterHero||
+                    a.poster||
+                    '';
+
+                if(bg){
+                    putImage(
+                        c,
+                        bg,
+                        a.title,
+                        false
                     );
-
-                if(!groups[key]){
-                    groups[key]=[];
                 }
 
-                groups[key]
-                    .push(a);
+                c.append(
+                    '<div class="ah-schcopy">'+
+                        '<div class="ah-schtitle">'+
+                            esc(
+                                a.title
+                            )+
+                        '</div>'+
+                        '<div class="ah-smallmeta">'+
+                            esc(
+                                formatDate(
+                                    a.episodes&&
+                                    a.episodes.nextDate,
+                                    true
+                                )
+                            )+
+                        '</div>'+
+                    '</div>'
+                );
+
+                c.on(
+                    'hover:enter click',
+
+                    function(e){
+                        if(e){
+                            e.preventDefault();
+                        }
+
+                        openDetail(a);
+                    }
+                );
+
+                grid.append(c);
             }
         );
 
-        Object.keys(groups)
-            .forEach(
-                function(day){
-
-                    var section=
-                        $(
-                            '<div class="ah-schedule-day">'+
-                                '<div class="ah-schedule-day-title">'+
-                                    esc(day)+
-                                '</div>'+
-                            '</div>'
-                        );
-
-                    var grid=
-                        $('<div class="ah-schedule-grid"></div>');
-
-                    groups[day]
-                        .forEach(
-                            function(a){
-
-                                var card=
-                                    $('<div class="ah-schedule-card selector"></div>');
-
-                                var bg=
-                                    a.background||
-                                    a.posterHero||
-                                    a.poster||
-                                    '';
-
-                                if(bg){
-                                    $('<img alt="">')
-                                        .attr({
-                                            src:bg,
-                                            loading:'lazy'
-                                        })
-                                        .appendTo(card);
-                                }
-
-                                card.append(
-                                    '<div class="ah-schedule-copy">'+
-                                        '<div class="ah-schedule-title">'+
-                                            esc(
-                                                a.title
-                                            )+
-                                        '</div>'+
-                                        '<div class="ah-schedule-meta">'+
-                                            esc(
-                                                formatDate(
-                                                    a.episodes&&
-                                                    a.episodes.nextDate,
-                                                    true
-                                                )
-                                            )+
-                                            ' • серия '+
-                                            esc(
-                                                (
-                                                    a.episodes&&
-                                                    a.episodes.aired
-                                                )
-                                                    ?intv(
-                                                        a.episodes.aired,
-                                                        0
-                                                    )+
-                                                    1
-                                                    :'—'
-                                            )+
-                                        '</div>'+
-                                    '</div>'
-                                );
-
-                                card.on(
-                                    'hover:enter',
-
-                                    function(){
-                                        openDetail(a);
-                                    }
-                                );
-
-                                grid.append(card);
-                            }
-                        );
-
-                    root.append(
-                        section.append(
-                            grid
-                        )
-                    );
-                }
-            );
-
-        if(
-            !Object.keys(groups).length
-        ){
-            root.append(
-                '<div class="ah-empty">'+
-                    'Расписание пока пусто.'+
-                '</div>'
-            );
-        }
+        root.append(grid);
 
         nav.bind();
 
         setTimeout(
             function(){
-
-                var first=
-                    root.find(
-                        '.ah-schedule-card'
-                    )[0]||
-                    root.find(
+                var f=
+                    grid.find(
                         '.selector'
                     )[0];
 
-                if(first){
-                    nav.focus(first);
+                if(f){
+                    nav.focus(f);
                 }
             },
-
-            40
+            20
         );
     }
 
@@ -6642,13 +6287,13 @@ function ScheduleComponent(){
                 'schedule'
             ),
 
-            loaderHtml(
+            loader(
                 'Загрузка расписания…'
             )
         );
 
         nav=
-            makeNav(
+            navFor(
                 root,
                 view,
 
@@ -6668,7 +6313,7 @@ function ScheduleComponent(){
         requestCached(
             net,
             'schedule',
-            900000,
+            600000,
             workerUrl(
                 'schedule'
             ),
@@ -6691,7 +6336,7 @@ function ScheduleComponent(){
             Lampa.Activity.active().activity===
             this.activity
         ){
-            installController(
+            controller(
                 view,
                 root,
                 nav,
@@ -6717,6 +6362,7 @@ function ScheduleComponent(){
     };
 }
 
+
 /* ============================================================
  * FAVORITES
  * ============================================================ */
@@ -6737,30 +6383,28 @@ function FavoritesComponent(){
             return;
         }
 
-        root
-            .empty()
-            .append(
-                topbar(
-                    'favorites'
-                )
-            );
-
         var items=
             storedList(
                 FAVORITES_KEY
             );
 
-        root.append(
-            '<div class="ah-section-head">'+
-                '<div class="ah-page-title">'+
-                    'Избранное'+
-                '</div>'+
-                '<div class="ah-page-sub">'+
-                    'Локально на этом устройстве • '+
-                    items.length+
-                '</div>'+
-            '</div>'
-        );
+        root
+            .empty()
+            .append(
+                topbar(
+                    'favorites'
+                ),
+
+                '<div class="ah-head">'+
+                    '<div class="ah-page-title">'+
+                        'Избранное'+
+                    '</div>'+
+                    '<div class="ah-page-sub">'+
+                        items.length+
+                        ' тайтлов'+
+                    '</div>'+
+                '</div>'
+            );
 
         if(!items.length){
             root.append(
@@ -6773,13 +6417,18 @@ function FavoritesComponent(){
             var grid=
                 $('<div class="ah-grid"></div>');
 
-            items.forEach(
-                function(a){
-                    grid.append(
-                        posterCard(a)
-                    );
-                }
-            );
+            items
+                .slice(
+                    0,
+                    24
+                )
+                .forEach(
+                    function(a){
+                        grid.append(
+                            posterCard(a)
+                        );
+                    }
+                );
 
             root.append(grid);
         }
@@ -6788,18 +6437,16 @@ function FavoritesComponent(){
 
         setTimeout(
             function(){
-
-                var first=
+                var f=
                     root.find(
                         '.selector'
                     )[0];
 
-                if(first){
-                    nav.focus(first);
+                if(f){
+                    nav.focus(f);
                 }
             },
-
-            35
+            20
         );
     }
 
@@ -6809,7 +6456,7 @@ function FavoritesComponent(){
         view.append(root);
 
         nav=
-            makeNav(
+            navFor(
                 root,
                 view,
 
@@ -6838,7 +6485,7 @@ function FavoritesComponent(){
         ){
             render();
 
-            installController(
+            controller(
                 view,
                 root,
                 nav,
@@ -6859,15 +6506,17 @@ function FavoritesComponent(){
 
     this.destroy=function(){
         alive=false;
+
         view.remove();
     };
 }
 
+
 /* ============================================================
- * MENU + INIT
+ * BOOT
  * ============================================================ */
 
-function addMenuButton(){
+function menu(){
     if(
         $(
             '.menu .menu__list [data-action="'+
@@ -6878,13 +6527,13 @@ function addMenuButton(){
         return;
     }
 
-    var button=
+    var b=
         $(
             '<li class="menu__item selector" data-action="'+
             NS+
             '">'+
                 '<div class="menu__ico">'+
-                    toriiSvg('')+
+                    torii('')+
                 '</div>'+
                 '<div class="menu__text">'+
                     'AnimeHub'+
@@ -6892,14 +6541,14 @@ function addMenuButton(){
             '</li>'
         );
 
-    button.on(
-        'hover:enter',
+    b.on(
+        'hover:enter click',
         openHome
     );
 
     $('.menu .menu__list')
         .eq(0)
-        .append(button);
+        .append(b);
 }
 
 function init(){
@@ -6918,9 +6567,9 @@ function init(){
     ]=true;
 
     try{
-        injectStyle();
+        style();
 
-        installPlaybackTracker();
+        installTracker();
 
         Lampa.Component.add(
             HOME,
@@ -6947,12 +6596,12 @@ function init(){
             FavoritesComponent
         );
 
-        addMenuButton();
+        menu();
 
         notify(
             'AnimeHub V'+
             VERSION+
-            ' загружен'
+            ' Lite загружен'
         );
     }
     catch(e){
