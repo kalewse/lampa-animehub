@@ -2,27 +2,20 @@
 'use strict';
 
 /*
- * AnimeHub V1.2.0 TV Fast
- * YummyAnime catalogue + native Lampa playback.
+ * AnimeHub V1.3.0 Native
+ * YummyAnime catalogue + working AnimeHub resolver/player.
  *
- * TV performance changes:
- * - 6 cards per home rail
- * - 10 cards per catalogue page
- * - shelf cards use portrait poster only (never large screenshot/backdrop)
- * - /videos loads only after Watch / Source / Load Episodes
- * - recommendations load only after explicit user action
- * - native Lampa Navigator instead of geometry-scanning every arrow press
- * - bounded memory caches
- *
- * Playback UX:
- * - Continue resumes last used voice/source directly
- * - first Watch asks for voice/source when multiple are available
- * - "Озвучка / источник" always opens the source list
- * - episode cards ask for source when multiple are available
+ * Performance architecture:
+ * - Lampa 3.x Maker Main -> native Line -> native Card on Home
+ * - Lampa 3.x Maker Category for catalogue/favourites/schedule
+ * - native Lampa request cache (IndexedDB) for catalogue metadata
+ * - custom HTML kept only for the branded hero/detail UI
+ * - videos/recommendations remain lazy
+ * - standalone native Line used for episodes and recommendations
  */
 
-var VERSION='1.2.0';
-var NS='animehub_v120';
+var VERSION='1.3.0';
+var NS='animehub_v130';
 
 var HOME=NS+'_home';
 var CATALOG=NS+'_catalog';
@@ -36,47 +29,31 @@ var WATCH_KEY='animehub_v020_watch';
 
 var WORKER='https://animehub-lampa.kalewse69.workers.dev/';
 
-var CACHE_MAX=28;
 var VIDEO_CACHE_MAX=5;
-
-var cache={};
-var cacheOrder=[];
-
 var videoCache={};
 var videoOrder=[];
 var videoInflight={};
-
 var genresCache=null;
+var CARD_MASK=null;
 
 /* ============================================================
  * BASICS
  * ============================================================ */
 
 function notify(text){
-    try{
-        Lampa.Noty.show(text);
-    }
+    try{ Lampa.Noty.show(text); }
     catch(e){}
 }
 
 function clean(v){
-    return String(
-        v==null
-            ?''
-            :v
-    )
-    .replace(/\u00a0/g,' ')
-    .replace(/\s+/g,' ')
-    .trim();
+    return String(v==null?'':v)
+        .replace(/\u00a0/g,' ')
+        .replace(/\s+/g,' ')
+        .trim();
 }
 
 function cleanDescription(v){
-    return clean(
-        String(
-            v==null
-                ?''
-                :v
-        )
+    return clean(String(v==null?'':v)
         .replace(/<br\s*\/?\s*>/gi,' ')
         .replace(/<[^>]*>/g,' ')
         .replace(/&nbsp;|&#160;/gi,' ')
@@ -84,59 +61,36 @@ function cleanDescription(v){
         .replace(/&quot;/gi,'"')
         .replace(/&#39;|&apos;/gi,"'")
         .replace(/&lt;/gi,'<')
-        .replace(/&gt;/gi,'>')
-    );
+        .replace(/&gt;/gi,'>'));
 }
 
 function esc(v){
-    return String(
-        v==null
-            ?''
-            :v
-    )
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;')
-    .replace(/'/g,'&#39;');
+    return String(v==null?'':v)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
 }
 
 function clip(v,n){
     v=clean(v);
-
-    if(
-        !n||
-        v.length<=n
-    ){
-        return v;
-    }
+    if(!n||v.length<=n) return v;
 
     return v
-        .slice(
-            0,
-            n
-        )
-        .replace(
-            /\s+\S*$/,
-            ''
-        )+
+        .slice(0,n)
+        .replace(/\s+\S*$/,'')+
         '…';
 }
 
 function num(v,d){
     v=parseFloat(v);
-
-    return isNaN(v)
-        ?(d||0)
-        :v;
+    return isNaN(v)?(d||0):v;
 }
 
 function intv(v,d){
     v=parseInt(v,10);
-
-    return isNaN(v)
-        ?(d||0)
-        :v;
+    return isNaN(v)?(d||0):v;
 }
 
 function score(v){
@@ -206,11 +160,15 @@ function episodeCount(a){
     }
 
     if(count){
-        return String(count);
+        return String(
+            count
+        );
     }
 
     if(aired){
-        return String(aired);
+        return String(
+            aired
+        );
     }
 
     return '—';
@@ -220,7 +178,10 @@ function formatDate(
     ts,
     withTime
 ){
-    ts=num(ts,0);
+    ts=num(
+        ts,
+        0
+    );
 
     if(!ts){
         return '';
@@ -335,42 +296,27 @@ function parseJson(v){
     }
 }
 
-function remember(
-    key,
-    data
-){
-    if(cache[key]){
-        cacheOrder=
-            cacheOrder.filter(
-                function(x){
-                    return x!==key;
-                }
-            );
-    }
-
-    cache[key]={
-        at:Date.now(),
-        data:data
-    };
-
-    cacheOrder.push(key);
-
-    while(
-        cacheOrder.length>
-        CACHE_MAX
-    ){
-        delete cache[
-            cacheOrder.shift()
-        ];
-    }
-}
-
 function requestJson(
     net,
     url,
+    cacheMinutes,
     ok,
     fail
 ){
+    var options={
+        dataType:'text'
+    };
+
+    if(
+        cacheMinutes>
+        0
+    ){
+        options.cache={
+            life:
+                cacheMinutes
+        };
+    }
+
     net.silent(
         url,
 
@@ -391,7 +337,8 @@ function requestJson(
                             data.error||
                             'Ошибка AnimeHub Worker',
 
-                        data:data
+                        data:
+                            data
                     });
                 }
 
@@ -399,7 +346,9 @@ function requestJson(
             }
 
             if(ok){
-                ok(data);
+                ok(
+                    data
+                );
             }
         },
 
@@ -414,60 +363,53 @@ function requestJson(
 
         false,
 
-        {
-            dataType:'text'
-        }
+        options
     );
 }
 
-function requestCached(
-    net,
-    key,
-    age,
-    url,
-    ok,
-    fail
-){
-    var hit=
-        cache[key];
-
-    if(
-        hit&&
-        Date.now()-
-        hit.at<
-        age
-    ){
-        setTimeout(
-            function(){
-                ok(
-                    hit.data
-                );
-            },
+function nativeReady(){
+    return !!(
+        Lampa.Maker&&
+        Lampa.Manifest&&
+        intv(
+            Lampa.Manifest.app_digital,
             0
-        );
+        )>=
+        300
+    );
+}
 
-        return;
+function cardMask(){
+    if(
+        CARD_MASK!==
+        null
+    ){
+        return CARD_MASK;
     }
 
-    requestJson(
-        net,
-        url,
+    try{
+        CARD_MASK=
+            Lampa.Maker
+                .module(
+                    'Card'
+                )
+                .only(
+                    'Card',
+                    'Ratting',
+                    'Release',
+                    'Style'
+                );
+    }
+    catch(e){
+        CARD_MASK=
+            undefined;
+    }
 
-        function(data){
-            remember(
-                key,
-                data
-            );
-
-            ok(data);
-        },
-
-        fail
-    );
+    return CARD_MASK;
 }
 
 /* ============================================================
- * TORII
+ * TORII / CSS
  * ============================================================ */
 
 function toriiSvg(cls){
@@ -480,13 +422,13 @@ function toriiSvg(cls){
         '" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">'+
 
         '<defs>'+
-            '<linearGradient id="ah120g" x1="0" y1="0" x2="1" y2="1">'+
+            '<linearGradient id="ah130g" x1="0" y1="0" x2="1" y2="1">'+
                 '<stop offset="0" stop-color="#a970ff"/>'+
                 '<stop offset="1" stop-color="#ed5fd4"/>'+
             '</linearGradient>'+
         '</defs>'+
 
-        '<path fill="url(#ah120g)" d="'+
+        '<path fill="url(#ah130g)" d="'+
             'M13 20h70l-3.4 10.5c-20.9 4.1-42.3 4.1-63.2 0L13 20z '+
             'M21 37h54v8H21z '+
             'M29 48h9v29h-9z '+
@@ -498,12 +440,412 @@ function toriiSvg(cls){
     );
 }
 
+function injectStyle(){
+    if(
+        $('#animehub-v130-style')
+            .length
+    ){
+        return;
+    }
+
+    $('head').append(`
+<style id="animehub-v130-style">
+
+.ah130-hero-line{
+    padding:0 0 1.2em;
+    box-sizing:border-box
+}
+
+.ah130-top{
+    height:3.7em;
+    display:flex;
+    align-items:center;
+    gap:.8em;
+    padding:0 .35em;
+    box-sizing:border-box
+}
+
+.ah130-brand{
+    display:flex;
+    align-items:center;
+    gap:.42em;
+    font-size:1.35em;
+    font-weight:900;
+    padding-right:.9em;
+    border-right:1px solid rgba(255,255,255,.13)
+}
+
+.ah130-logo{
+    width:1.8em;
+    height:1.8em
+}
+
+.ah130-name{
+    background:linear-gradient(90deg,#fff,#dc8cff);
+    -webkit-background-clip:text;
+    color:transparent
+}
+
+.ah130-nav{
+    display:flex;
+    gap:.15em
+}
+
+.ah130-navbtn{
+    padding:.52em .66em;
+    border-radius:.52em;
+    white-space:nowrap
+}
+
+.ah130-navbtn.focus{
+    background:#8754e9;
+    color:#fff
+}
+
+.ah130-hero{
+    height:24em;
+    position:relative;
+    overflow:hidden;
+    border-radius:.85em;
+    isolation:isolate;
+    background:#111629
+}
+
+.ah130-bg{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    z-index:-5
+}
+
+.ah130-shade{
+    position:absolute;
+    inset:0;
+    z-index:-4;
+    background:
+        linear-gradient(
+            90deg,
+            rgba(4,6,15,.995) 0%,
+            rgba(4,6,15,.95) 30%,
+            rgba(4,6,15,.67) 55%,
+            rgba(4,6,15,.18) 80%,
+            rgba(4,6,15,.05) 100%
+        ),
+        linear-gradient(
+            0deg,
+            rgba(4,6,15,.88),
+            transparent 62%
+        )
+}
+
+.ah130-hero-copy{
+    position:absolute;
+    left:3.1%;
+    top:7%;
+    bottom:7%;
+    width:55%;
+    display:flex;
+    flex-direction:column;
+    justify-content:center
+}
+
+.ah130-kicker{
+    color:#df8cff;
+    font-size:.7em;
+    font-weight:800;
+    letter-spacing:.09em;
+    text-transform:uppercase;
+    margin-bottom:.45em
+}
+
+.ah130-title{
+    font-size:2.7em;
+    font-weight:900;
+    line-height:1.02;
+    text-shadow:0 2px 6px #000
+}
+
+.ah130-original{
+    color:#b9b5c6;
+    margin:.2em 0 .5em
+}
+
+.ah130-meta{
+    display:flex;
+    flex-wrap:wrap;
+    gap:.35em;
+    margin:.32em 0
+}
+
+.ah130-chip{
+    font-size:.74em;
+    padding:.24em .49em;
+    border-radius:999px;
+    background:rgba(255,255,255,.09);
+    border:1px solid rgba(255,255,255,.11)
+}
+
+.ah130-score{
+    color:#ffd76a
+}
+
+.ah130-desc{
+    font-size:.92em;
+    line-height:1.46;
+    color:#f5f3fa;
+    max-width:46em;
+    margin:.5em 0 .8em;
+    text-shadow:0 2px 4px #000
+}
+
+.ah130-actions{
+    display:flex;
+    gap:.5em;
+    flex-wrap:wrap
+}
+
+.ah130-btn,
+.ah130-lazy{
+    padding:.62em .84em;
+    border-radius:.53em;
+    background:rgba(255,255,255,.10);
+    border:1px solid rgba(255,255,255,.12);
+    font-weight:750
+}
+
+.ah130-btn.primary{
+    background:linear-gradient(
+        135deg,
+        #965cf8,
+        #7444e9 65%,
+        #d84fd6
+    )
+}
+
+.ah130-btn.focus,
+.ah130-lazy.focus{
+    background:#fff;
+    color:#090b14
+}
+
+.ah130-detail-wrap{
+    padding:0 1.65em 4em;
+    color:#faf8ff;
+    box-sizing:border-box
+}
+
+.ah130-detail-top{
+    height:3.7em;
+    display:flex;
+    align-items:center;
+    gap:.8em
+}
+
+.ah130-detail{
+    position:relative;
+    min-height:27em;
+    border-radius:.85em;
+    overflow:hidden;
+    isolation:isolate;
+    background:#0d1120;
+    margin-bottom:1em
+}
+
+.ah130-detail-inner{
+    display:flex;
+    gap:.9em;
+    padding:1.15em;
+    align-items:center;
+    min-height:26em;
+    box-sizing:border-box
+}
+
+.ah130-poster{
+    width:10.8em;
+    min-width:10.8em;
+    height:16em;
+    border-radius:.62em;
+    overflow:hidden;
+    background:#15192b;
+    border:1px solid rgba(255,255,255,.13)
+}
+
+.ah130-poster img,
+.ah130-shot img{
+    width:100%;
+    height:100%;
+    object-fit:cover
+}
+
+.ah130-detail-main{
+    flex:1;
+    min-width:0;
+    padding:.68em .78em;
+    border-radius:.62em;
+    background:
+        linear-gradient(
+            90deg,
+            rgba(4,6,15,.76),
+            rgba(4,6,15,.26),
+            transparent
+        )
+}
+
+.ah130-detail-title{
+    font-size:2.15em;
+    font-weight:900;
+    line-height:1.05;
+    text-shadow:0 2px 6px #000
+}
+
+.ah130-studio{
+    font-size:.75em;
+    color:#cbc7d5;
+    margin:.12em 0
+}
+
+.ah130-aside{
+    width:14.5em;
+    min-width:14.5em;
+    background:rgba(9,12,25,.84);
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:.65em;
+    padding:.68em
+}
+
+.ah130-aside-title{
+    font-weight:850;
+    margin-bottom:.16em
+}
+
+.ah130-info{
+    display:flex;
+    justify-content:space-between;
+    gap:.45em;
+    font-size:.72em;
+    padding:.42em 0;
+    border-bottom:1px solid rgba(255,255,255,.06)
+}
+
+.ah130-info span:first-child{
+    color:#aaa7b8
+}
+
+.ah130-info span:last-child{
+    text-align:right;
+    font-weight:700;
+    max-width:62%
+}
+
+.ah130-block{
+    margin:1em 0
+}
+
+.ah130-block-title{
+    font-size:1.18em;
+    font-weight:850;
+    margin:0 0 .46em
+}
+
+.ah130-placeholder{
+    padding:.75em;
+    border-radius:.62em;
+    background:#101426;
+    color:#bbb7c8;
+    display:flex;
+    gap:.55em;
+    align-items:center;
+    flex-wrap:wrap
+}
+
+.ah130-shots{
+    display:flex;
+    gap:.62em;
+    overflow-x:auto;
+    padding:.1em 0 .45em
+}
+
+.ah130-shots::-webkit-scrollbar{
+    width:0;
+    height:0
+}
+
+.ah130-shot{
+    flex:0 0 14.5em;
+    height:8.1em;
+    border-radius:.56em;
+    overflow:hidden;
+    background:#14182a
+}
+
+.ah130-longdesc{
+    background:#101426;
+    border:1px solid rgba(255,255,255,.06);
+    border-radius:.62em;
+    padding:.8em;
+    line-height:1.48;
+    color:#d5d2de;
+    margin-bottom:.95em
+}
+
+.ah130-loader{
+    min-height:20em;
+    display:flex;
+    position:relative;
+    flex-direction:column;
+    justify-content:center;
+    align-items:center;
+    gap:.65em;
+    color:#bbb7c8
+}
+
+.ah130-loader-logo{
+    width:4.2em;
+    height:4.2em
+}
+
+.ah130-loader-ring{
+    position:absolute;
+    width:5.4em;
+    height:5.4em;
+    border:2px solid rgba(180,110,255,.12);
+    border-top-color:#cc76ff;
+    border-radius:50%;
+    animation:ah130-spin 1s linear infinite
+}
+
+@keyframes ah130-spin{
+    to{
+        transform:rotate(360deg)
+    }
+}
+
+@media(max-width:1250px){
+    .ah130-aside{
+        display:none
+    }
+
+    .ah130-detail-title{
+        font-size:1.95em
+    }
+
+    .ah130-hero-copy{
+        width:62%
+    }
+}
+
+</style>
+    `);
+}
+
 function loaderHtml(text){
     return (
-        '<div class="ah-loader">'+
-            '<div class="ah-loader-ring"></div>'+
+        '<div class="ah130-loader">'+
+            '<div class="ah130-loader-ring"></div>'+
             toriiSvg(
-                'ah-loader-logo'
+                'ah130-loader-logo'
             )+
             '<div>'+
                 esc(
@@ -512,6 +854,28 @@ function loaderHtml(text){
                 )+
             '</div>'+
         '</div>'
+    );
+}
+
+function imageElement(
+    url,
+    cls
+){
+    if(!url){
+        return '';
+    }
+
+    return (
+        '<img class="'+
+        esc(
+            cls||
+            ''
+        )+
+        '" src="'+
+        esc(
+            url
+        )+
+        '" decoding="async" alt="">'
     );
 }
 
@@ -534,6 +898,19 @@ function stored(
     }
 }
 
+function setStored(
+    key,
+    value
+){
+    try{
+        Lampa.Storage.set(
+            key,
+            value
+        );
+    }
+    catch(e){}
+}
+
 function storedList(key){
     var v=
         stored(
@@ -544,19 +921,6 @@ function storedList(key){
     return Array.isArray(v)
         ?v
         :[];
-}
-
-function setStored(
-    key,
-    v
-){
-    try{
-        Lampa.Storage.set(
-            key,
-            v
-        );
-    }
-    catch(e){}
 }
 
 function compactAnime(a){
@@ -627,7 +991,10 @@ function compactAnime(a){
     };
 }
 
-function sameAnime(a,b){
+function sameAnime(
+    a,
+    b
+){
     if(
         !a||
         !b
@@ -640,8 +1007,12 @@ function sameAnime(a,b){
         b.source==='yummy'
     ){
         return (
-            String(a.id)===
-            String(b.id)
+            String(
+                a.id
+            )===
+            String(
+                b.id
+            )
         );
     }
 
@@ -654,8 +1025,12 @@ function sameAnime(a,b){
             b.id||
             ''
         )&&
-        clean(a.title)===
-        clean(b.title)
+        clean(
+            a.title
+        )===
+        clean(
+            b.title
+        )
     );
 }
 
@@ -694,16 +1069,20 @@ function toggleFavorite(a){
             }
             else if(
                 out.length<
-                39
+                49
             ){
-                out.push(x);
+                out.push(
+                    x
+                );
             }
         }
     );
 
     if(!found){
         out.unshift(
-            compactAnime(a)
+            compactAnime(
+                a
+            )
         );
     }
 
@@ -724,7 +1103,9 @@ function saveRecent(a){
     }
 
     var out=[
-        compactAnime(a)
+        compactAnime(
+            a
+        )
     ];
 
     storedList(
@@ -734,13 +1115,15 @@ function saveRecent(a){
         function(x){
             if(
                 out.length<
-                18&&
+                20&&
                 !sameAnime(
                     x,
                     a
                 )
             ){
-                out.push(x);
+                out.push(
+                    x
+                );
             }
         }
     );
@@ -781,7 +1164,9 @@ function watchKey(a){
 function watchState(a){
     return (
         watchStore()[
-            watchKey(a)
+            watchKey(
+                a
+            )
         ]||
         {}
     );
@@ -802,7 +1187,9 @@ function saveWatchState(
         watchStore();
 
     var key=
-        watchKey(a);
+        watchKey(
+            a
+        );
 
     var state=
         store[key]||
@@ -823,7 +1210,9 @@ function saveWatchState(
         'yummy';
 
     state.anime=
-        compactAnime(a);
+        compactAnime(
+            a
+        );
 
     state.updatedAt=
         Date.now();
@@ -841,1226 +1230,52 @@ function continueStates(){
     var store=
         watchStore();
 
-    return Object.keys(store)
-        .map(
-            function(k){
-                return store[k];
-            }
-        )
-        .filter(
-            function(x){
-                return (
-                    x&&
-                    x.source===
-                    'yummy'&&
-                    x.anime&&
-                    x.anime.id&&
-                    num(
-                        x.episode,
-                        0
-                    )>
+    return Object.keys(
+        store
+    )
+    .map(
+        function(k){
+            return store[k];
+        }
+    )
+    .filter(
+        function(x){
+            return (
+                x&&
+                x.source===
+                'yummy'&&
+                x.anime&&
+                x.anime.id&&
+                num(
+                    x.episode,
                     0
-                );
-            }
-        )
-        .sort(
-            function(a,b){
-                return (
-                    num(
-                        b.updatedAt,
-                        0
-                    )-
-                    num(
-                        a.updatedAt,
-                        0
-                    )
-                );
-            }
-        )
-        .slice(
-            0,
-            6
-        );
-}
-
-/* ============================================================
- * STYLE
- * ============================================================ */
-
-function injectStyle(){
-    if(
-        $('#animehub-v120-style')
-            .length
-    ){
-        return;
-    }
-
-    $('head').append(`
-<style id="animehub-v120-style">
-:root{
-    --ah-bg:#070914;
-    --ah-panel:#111527;
-    --ah-text:#faf8ff;
-    --ah-muted:#aaa7bb;
-    --ah-purple:#8c58f8;
-    --ah-pink:#e65ed1
-}
-
-.ah-view{
-    height:calc(100vh - 6.1em);
-    overflow-y:auto;
-    overflow-x:hidden;
-    color:var(--ah-text);
-    background:linear-gradient(180deg,#090c19,#060812 72%);
-    box-sizing:border-box
-}
-
-.ah-view::-webkit-scrollbar,
-.ah-row::-webkit-scrollbar,
-.ah-eprow::-webkit-scrollbar,
-.ah-shots::-webkit-scrollbar{
-    width:0;
-    height:0
-}
-
-.ah-page{
-    padding:0 1.7em 4em;
-    box-sizing:border-box;
-    min-height:100%
-}
-
-.ah-top{
-    height:4.15em;
-    display:flex;
-    align-items:center;
-    gap:.85em
-}
-
-.ah-brand{
-    display:flex;
-    align-items:center;
-    gap:.42em;
-    font-size:1.42em;
-    font-weight:900;
-    padding-right:.9em;
-    border-right:1px solid rgba(255,255,255,.13);
-    white-space:nowrap
-}
-
-.ah-logo{
-    width:1.85em;
-    height:1.85em
-}
-
-.ah-name{
-    background:linear-gradient(90deg,#fff,#dc8cff);
-    -webkit-background-clip:text;
-    color:transparent
-}
-
-.ah-nav{
-    display:flex;
-    gap:.15em;
-    overflow:hidden
-}
-
-.ah-navbtn{
-    padding:.53em .67em;
-    border-radius:.52em;
-    white-space:nowrap
-}
-
-.ah-navbtn.active{
-    background:rgba(131,75,235,.22)
-}
-
-.ah-navbtn.focus{
-    background:#8754e9;
-    color:#fff
-}
-
-.ah-hero{
-    height:38vh;
-    min-height:20.5em;
-    max-height:27em;
-    position:relative;
-    overflow:hidden;
-    border-radius:.82em;
-    margin-bottom:1.15em;
-    isolation:isolate;
-    background:#111629
-}
-
-.ah-bg{
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    object-fit:cover;
-    z-index:-5
-}
-
-.ah-shade{
-    position:absolute;
-    inset:0;
-    z-index:-4;
-    background:
-        linear-gradient(
-            90deg,
-            rgba(4,6,15,.99) 0%,
-            rgba(4,6,15,.95) 29%,
-            rgba(4,6,15,.69) 53%,
-            rgba(4,6,15,.19) 78%,
-            rgba(4,6,15,.05) 100%
-        ),
-        linear-gradient(
-            0deg,
-            rgba(4,6,15,.86),
-            transparent 60%
-        )
-}
-
-.ah-hero-copy{
-    position:absolute;
-    left:3.1%;
-    top:7%;
-    bottom:7%;
-    width:54%;
-    display:flex;
-    flex-direction:column;
-    justify-content:center
-}
-
-.ah-kicker{
-    color:#df8cff;
-    font-size:.7em;
-    font-weight:800;
-    letter-spacing:.09em;
-    text-transform:uppercase;
-    margin-bottom:.45em
-}
-
-.ah-title{
-    font-size:2.65em;
-    font-weight:900;
-    line-height:1.02;
-    text-shadow:0 2px 6px #000
-}
-
-.ah-original{
-    color:#b9b5c6;
-    margin:.2em 0 .5em
-}
-
-.ah-meta{
-    display:flex;
-    flex-wrap:wrap;
-    gap:.35em;
-    margin:.32em 0
-}
-
-.ah-chip{
-    font-size:.74em;
-    padding:.24em .49em;
-    border-radius:999px;
-    background:rgba(255,255,255,.09);
-    border:1px solid rgba(255,255,255,.11)
-}
-
-.ah-score{
-    color:#ffd76a
-}
-
-.ah-description{
-    font-size:.92em;
-    line-height:1.46;
-    color:#f5f3fa;
-    max-width:46em;
-    margin:.5em 0 .8em;
-    text-shadow:0 2px 4px #000
-}
-
-.ah-actions{
-    display:flex;
-    gap:.5em;
-    flex-wrap:wrap
-}
-
-.ah-button,
-.ah-filter,
-.ah-pagebtn,
-.ah-all,
-.ah-lazybtn{
-    padding:.62em .84em;
-    border-radius:.53em;
-    background:rgba(255,255,255,.10);
-    border:1px solid rgba(255,255,255,.12);
-    font-weight:750
-}
-
-.ah-button.primary{
-    background:linear-gradient(
-        135deg,
-        #965cf8,
-        #7444e9 65%,
-        #d84fd6
-    )
-}
-
-.ah-button.focus,
-.ah-filter.focus,
-.ah-pagebtn.focus,
-.ah-all.focus,
-.ah-lazybtn.focus{
-    background:#fff;
-    color:#090b14
-}
-
-.ah-shelf{
-    margin-bottom:1.08em
-}
-
-.ah-shelf-title,
-.ah-block-title,
-.ah-eptitle{
-    font-size:1.18em;
-    font-weight:850;
-    margin:0 0 .46em
-}
-
-.ah-row,
-.ah-eprow,
-.ah-shots{
-    display:flex;
-    gap:.62em;
-    overflow-x:auto;
-    overflow-y:hidden;
-    padding:.18em .14em .56em;
-    scroll-behavior:auto
-}
-
-.ah-wide{
-    position:relative;
-    flex:0 0 11.4em;
-    height:6.3em;
-    border-radius:.58em;
-    overflow:hidden;
-    background:#111628;
-    border:1px solid rgba(255,255,255,.07)
-}
-
-.ah-wide img{
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    object-fit:cover
-}
-
-.ah-cardshade{
-    position:absolute;
-    inset:0;
-    background:linear-gradient(
-        0deg,
-        rgba(5,7,16,.99),
-        rgba(5,7,16,.17) 76%
-    )
-}
-
-.ah-wide-copy{
-    position:absolute;
-    left:.5em;
-    right:.5em;
-    bottom:.4em
-}
-
-.ah-wide-title{
-    font-size:.78em;
-    font-weight:780;
-    line-height:1.12;
-    max-height:2.25em;
-    overflow:hidden
-}
-
-.ah-smallmeta{
-    font-size:.59em;
-    color:#c9c6d3;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis
-}
-
-.ah-badge{
-    position:absolute;
-    left:.38em;
-    top:.35em;
-    font-size:.56em;
-    font-weight:850;
-    padding:.18em .34em;
-    border-radius:.32em;
-    background:#7d49e9
-}
-
-.ah-progress{
-    position:absolute;
-    left:0;
-    right:0;
-    bottom:0;
-    height:.17em;
-    background:rgba(255,255,255,.11)
-}
-
-.ah-progress span{
-    display:block;
-    height:100%;
-    background:linear-gradient(
-        90deg,
-        #8d59ff,
-        #e85fd0
-    )
-}
-
-.ah-wide.focus,
-.ah-poster.focus,
-.ah-ep.focus,
-.ah-sch.focus{
-    border-color:#dab8ff;
-    outline:2px solid rgba(158,100,255,.36);
-    z-index:4
-}
-
-.ah-head{
-    padding:.42em 0 .8em
-}
-
-.ah-page-title{
-    font-size:1.85em;
-    font-weight:900
-}
-
-.ah-page-sub{
-    color:#9996aa;
-    font-size:.8em
-}
-
-.ah-catalog{
-    display:flex;
-    gap:.9em;
-    align-items:flex-start
-}
-
-.ah-side{
-    width:9.8em;
-    min-width:9.8em;
-    padding:.46em;
-    border-radius:.65em;
-    background:#0e1222
-}
-
-.ah-filter{
-    width:100%;
-    margin:.14em 0;
-    font-size:.77em
-}
-
-.ah-filter.selected{
-    background:rgba(132,79,239,.34)
-}
-
-.ah-main{
-    flex:1;
-    min-width:0
-}
-
-.ah-grid{
-    display:grid;
-    grid-template-columns:repeat(5,minmax(0,1fr));
-    gap:.62em
-}
-
-.ah-poster{
-    min-width:0;
-    padding:.16em;
-    border-radius:.6em
-}
-
-.ah-poster-media{
-    height:11.8em;
-    position:relative;
-    border-radius:.48em;
-    overflow:hidden;
-    background:#14182a
-}
-
-.ah-poster-media img,
-.ah-detail-poster img,
-.ah-shot img{
-    width:100%;
-    height:100%;
-    object-fit:cover
-}
-
-.ah-poster-title{
-    font-size:.75em;
-    font-weight:730;
-    height:2.05em;
-    overflow:hidden;
-    margin:.38em .02em .08em
-}
-
-.ah-poster-meta{
-    font-size:.59em;
-    color:#8f8ca1;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis
-}
-
-.ah-poster-score{
-    position:absolute;
-    right:.32em;
-    bottom:.32em;
-    font-size:.62em;
-    padding:.16em .3em;
-    background:rgba(5,7,15,.88);
-    border-radius:.3em;
-    color:#ffd76a
-}
-
-.ah-pages{
-    display:flex;
-    gap:.5em;
-    margin-top:.9em
-}
-
-.ah-detail{
-    position:relative;
-    min-height:27em;
-    border-radius:.82em;
-    overflow:hidden;
-    isolation:isolate;
-    background:#0d1120;
-    margin-bottom:.95em
-}
-
-.ah-detail-copywrap{
-    display:flex;
-    gap:.9em;
-    padding:1.15em;
-    align-items:center;
-    min-height:26em;
-    box-sizing:border-box
-}
-
-.ah-detail-poster{
-    width:10.6em;
-    min-width:10.6em;
-    height:15.7em;
-    border-radius:.62em;
-    overflow:hidden;
-    background:#15192b;
-    border:1px solid rgba(255,255,255,.13)
-}
-
-.ah-detail-main{
-    flex:1;
-    min-width:0;
-    padding:.68em .78em;
-    border-radius:.62em;
-    background:linear-gradient(
-        90deg,
-        rgba(4,6,15,.72),
-        rgba(4,6,15,.24),
-        transparent
-    )
-}
-
-.ah-detail-title{
-    font-size:2.15em;
-    font-weight:900;
-    line-height:1.05;
-    text-shadow:0 2px 6px #000
-}
-
-.ah-aside{
-    width:14.5em;
-    min-width:14.5em;
-    background:rgba(9,12,25,.82);
-    border:1px solid rgba(255,255,255,.09);
-    border-radius:.65em;
-    padding:.68em
-}
-
-.ah-aside-title{
-    font-weight:850;
-    margin-bottom:.16em
-}
-
-.ah-info{
-    display:flex;
-    justify-content:space-between;
-    gap:.45em;
-    font-size:.72em;
-    padding:.42em 0;
-    border-bottom:1px solid rgba(255,255,255,.06)
-}
-
-.ah-info span:first-child{
-    color:#aaa7b8
-}
-
-.ah-info span:last-child{
-    text-align:right;
-    font-weight:700;
-    max-width:62%
-}
-
-.ah-studio{
-    font-size:.75em;
-    color:#cbc7d5;
-    margin:.12em 0
-}
-
-.ah-longdesc{
-    background:#101426;
-    border:1px solid rgba(255,255,255,.06);
-    border-radius:.62em;
-    padding:.8em;
-    line-height:1.48;
-    color:#d5d2de;
-    margin-bottom:.95em
-}
-
-.ah-ephead{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-bottom:.42em
-}
-
-.ah-epcount{
-    font-size:.67em;
-    color:#bbb7c8;
-    background:rgba(255,255,255,.07);
-    padding:.18em .42em;
-    border-radius:99px;
-    margin-left:.45em
-}
-
-.ah-ep{
-    position:relative;
-    flex:0 0 9.6em;
-    height:5.45em;
-    border-radius:.56em;
-    overflow:hidden;
-    background:#13172a;
-    border:1px solid rgba(255,255,255,.08)
-}
-
-.ah-ep img{
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    object-fit:cover
-}
-
-.ah-epnum{
-    position:absolute;
-    left:.36em;
-    top:.32em;
-    font-size:.67em;
-    font-weight:850;
-    background:rgba(5,7,16,.88);
-    padding:.18em .31em;
-    border-radius:.28em
-}
-
-.ah-epcopy{
-    position:absolute;
-    left:.4em;
-    right:.4em;
-    bottom:.34em
-}
-
-.ah-epname{
-    font-size:.67em;
-    font-weight:760
-}
-
-.ah-epmeta{
-    font-size:.55em;
-    color:#c6c2d0;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis
-}
-
-.ah-placeholder{
-    padding:.75em;
-    border-radius:.62em;
-    background:#101426;
-    color:#bbb7c8;
-    display:flex;
-    gap:.5em;
-    align-items:center
-}
-
-.ah-spinner{
-    width:1em;
-    height:1em;
-    border-radius:50%;
-    border:2px solid rgba(187,125,255,.15);
-    border-top-color:#c878ff;
-    animation:ah-spin .9s linear infinite
-}
-
-.ah-shot{
-    flex:0 0 14.5em;
-    height:8.1em;
-    border-radius:.56em;
-    overflow:hidden;
-    background:#14182a
-}
-
-.ah-schgrid{
-    display:grid;
-    grid-template-columns:repeat(4,minmax(0,1fr));
-    gap:.62em
-}
-
-.ah-sch{
-    height:5.9em;
-    position:relative;
-    border-radius:.56em;
-    overflow:hidden;
-    background:#14182a;
-    border:1px solid rgba(255,255,255,.07)
-}
-
-.ah-sch img{
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    object-fit:cover;
-    opacity:.72
-}
-
-.ah-schcopy{
-    position:absolute;
-    left:.46em;
-    right:.46em;
-    bottom:.38em;
-    z-index:2
-}
-
-.ah-sch:after{
-    content:'';
-    position:absolute;
-    inset:0;
-    background:linear-gradient(
-        0deg,
-        rgba(5,7,16,.98),
-        rgba(5,7,16,.08)
-    )
-}
-
-.ah-schtitle{
-    font-size:.72em;
-    font-weight:760;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis
-}
-
-.ah-empty{
-    padding:1.4em;
-    color:#aaa7bb
-}
-
-.ah-fallback{
-    width:100%;
-    height:100%;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    text-align:center;
-    background:#15192b;
-    color:#89869b;
-    font-size:.7em;
-    padding:.35em;
-    box-sizing:border-box
-}
-
-.ah-loader{
-    min-height:19em;
-    display:flex;
-    position:relative;
-    flex-direction:column;
-    justify-content:center;
-    align-items:center;
-    gap:.65em;
-    color:#bbb7c8
-}
-
-.ah-loader-logo{
-    width:4.2em;
-    height:4.2em
-}
-
-.ah-loader-ring{
-    position:absolute;
-    width:5.4em;
-    height:5.4em;
-    border:2px solid rgba(180,110,255,.12);
-    border-top-color:#cc76ff;
-    border-radius:50%;
-    animation:ah-spin 1s linear infinite
-}
-
-@keyframes ah-spin{
-    to{
-        transform:rotate(360deg)
-    }
-}
-
-@media(max-width:1250px){
-    .ah-grid{
-        grid-template-columns:repeat(5,minmax(0,1fr))
-    }
-
-    .ah-aside{
-        display:none
-    }
-
-    .ah-detail-title{
-        font-size:1.95em
-    }
-
-    .ah-side{
-        width:9.2em;
-        min-width:9.2em
-    }
-}
-</style>
-    `);
-}
-
-/* ============================================================
- * IMAGES
- * ============================================================ */
-
-function putImage(
-    box,
-    url,
-    title,
-    eager
-){
-    if(!url){
-        box.append(
-            '<div class="ah-fallback">'+
-                esc(
-                    title||
-                    'AnimeHub'
-                )+
-            '</div>'
-        );
-
-        return;
-    }
-
-    var img=
-        $('<img alt="">')
-        .attr({
-            src:url,
-            decoding:'async'
-        });
-
-    if(!eager){
-        img.attr(
-            'loading',
-            'lazy'
-        );
-    }
-
-    img.on(
-        'error',
-        function(){
-            box
-                .empty()
-                .append(
-                    '<div class="ah-fallback">'+
-                        esc(
-                            title||
-                            'AnimeHub'
-                        )+
-                    '</div>'
-                );
-        }
-    );
-
-    box.append(img);
-}
-
-function putBackground(
-    box,
-    url
-){
-    if(!url){
-        return;
-    }
-
-    var img=
-        $('<img class="ah-bg" alt="">')
-        .attr({
-            src:url,
-            decoding:'async'
-        });
-
-    img.on(
-        'error',
-        function(){
-            $(this)
-                .remove();
-        }
-    );
-
-    box.append(img);
-}
-
-/* ============================================================
- * FAST NAVIGATION
- * Use Lampa/Navigator; no all-selector geometry scan per keypress.
- * ============================================================ */
-
-function safeNavigatorCan(direction){
-    try{
-        return (
-            typeof Navigator!==
-            'undefined'&&
-            Navigator.canmove(
-                direction
-            )
-        );
-    }
-    catch(e){
-        return false;
-    }
-}
-
-function safeNavigatorMove(direction){
-    try{
-        if(
-            typeof Navigator!==
-            'undefined'
-        ){
-            Navigator.move(
-                direction
+                )>
+                0
             );
         }
-    }
-    catch(e){}
-}
-
-function scrollFocused(
-    view,
-    node
-){
-    if(
-        !view||
-        !view[0]||
-        !node
-    ){
-        return;
-    }
-
-    var parent=
-        node.parentElement;
-
-    if(
-        parent&&
-        parent.scrollWidth>
-        parent.clientWidth+
-        4
-    ){
-        var left=
-            node.offsetLeft;
-
-        var right=
-            left+
-            node.offsetWidth;
-
-        var visibleLeft=
-            parent.scrollLeft;
-
-        var visibleRight=
-            visibleLeft+
-            parent.clientWidth;
-
-        if(
-            right>
-            visibleRight-
-            12
-        ){
-            parent.scrollLeft=
-                right-
-                parent.clientWidth+
-                12;
-        }
-        else if(
-            left<
-            visibleLeft+
-            12
-        ){
-            parent.scrollLeft=
-                Math.max(
-                    0,
-                    left-
-                    12
-                );
-        }
-    }
-
-    var top=0;
-    var cur=node;
-
-    while(
-        cur&&
-        cur!==
-        view[0]
-    ){
-        top+=
-            cur.offsetTop||
-            0;
-
-        cur=
-            cur.offsetParent;
-    }
-
-    var bottom=
-        top+
-        (
-            node.offsetHeight||
-            0
-        );
-
-    var vtop=
-        view[0]
-            .scrollTop;
-
-    var vbottom=
-        vtop+
-        view[0]
-            .clientHeight;
-
-    if(
-        bottom>
-        vbottom-
-        18
-    ){
-        view[0]
-            .scrollTop=
-                bottom-
-                view[0]
-                    .clientHeight+
-                18;
-    }
-    else if(
-        top<
-        vtop+
-        10
-    ){
-        view[0]
-            .scrollTop=
-                Math.max(
-                    0,
-                    top-
-                    10
-                );
-    }
-}
-
-function bindFocus(
-    root,
-    view,
-    state
-){
-    root.find(
-        '.selector'
     )
-    .off(
-        'hover:focus.'+
-        NS
-    )
-    .on(
-        'hover:focus.'+
-        NS,
-
-        function(){
-            state.last=
-                this;
-
-            scrollFocused(
-                view,
-                this
+    .sort(
+        function(a,b){
+            return (
+                num(
+                    b.updatedAt,
+                    0
+                )-
+                num(
+                    a.updatedAt,
+                    0
+                )
             );
         }
-    );
-}
-
-function installController(
-    view,
-    root,
-    state,
-    back
-){
-    Lampa.Controller.add(
-        'content',
-
-        {
-            toggle:function(){
-                try{
-                    Lampa.Controller.collectionSet(
-                        root
-                    );
-
-                    Lampa.Controller.collectionFocus(
-                        state.last||
-                        root.find(
-                            '.selector'
-                        )[0]||
-                        false,
-
-                        root
-                    );
-                }
-                catch(e){}
-            },
-
-            left:function(){
-                if(
-                    safeNavigatorCan(
-                        'left'
-                    )
-                ){
-                    safeNavigatorMove(
-                        'left'
-                    );
-                }
-                else{
-                    Lampa.Controller.toggle(
-                        'menu'
-                    );
-                }
-            },
-
-            right:function(){
-                if(
-                    safeNavigatorCan(
-                        'right'
-                    )
-                ){
-                    safeNavigatorMove(
-                        'right'
-                    );
-                }
-            },
-
-            up:function(){
-                if(
-                    safeNavigatorCan(
-                        'up'
-                    )
-                ){
-                    safeNavigatorMove(
-                        'up'
-                    );
-                }
-                else{
-                    Lampa.Controller.toggle(
-                        'head'
-                    );
-                }
-            },
-
-            down:function(){
-                if(
-                    safeNavigatorCan(
-                        'down'
-                    )
-                ){
-                    safeNavigatorMove(
-                        'down'
-                    );
-                }
-            },
-
-            enter:function(){
-                var x=
-                    root.find(
-                        '.selector.focus'
-                    )[0]||
-                    state.last;
-
-                if(x){
-                    $(x)
-                        .trigger(
-                            'hover:enter'
-                        );
-                }
-            },
-
-            back:function(){
-                back
-                    ?back()
-                    :Lampa.Activity.backward();
-            }
-        }
-    );
-
-    Lampa.Controller.toggle(
-        'content'
-    );
-}
-
-function focusFirst(
-    root,
-    state
-){
-    setTimeout(
-        function(){
-            var first=
-                root.find(
-                    '.selector'
-                )[0];
-
-            if(!first){
-                return;
-            }
-
-            state.last=
-                first;
-
-            try{
-                Lampa.Controller.collectionSet(
-                    root
-                );
-
-                Lampa.Controller.collectionFocus(
-                    first,
-                    root
-                );
-            }
-            catch(e){}
-        },
-
-        25
+    )
+    .slice(
+        0,
+        12
     );
 }
 
 /* ============================================================
- * ROUTES + TOP BAR
+ * ROUTES / SELECTIONS
  * ============================================================ */
 
 function openHome(){
@@ -2105,7 +1320,7 @@ function openCatalog(
 function openSchedule(){
     Lampa.Activity.push({
         url:'animehub/schedule',
-        title:'Расписание',
+        title:'AnimeHub • Расписание',
         component:SCHEDULE,
         page:1
     });
@@ -2114,7 +1329,7 @@ function openSchedule(){
 function openFavorites(){
     Lampa.Activity.push({
         url:'animehub/favorites',
-        title:'Избранное',
+        title:'AnimeHub • Избранное',
         component:FAVORITES,
         page:1
     });
@@ -2198,7 +1413,9 @@ function showSelect(
             settled=true;
 
             if(onSelect){
-                onSelect(item);
+                onSelect(
+                    item
+                );
             }
         },
 
@@ -2236,13 +1453,12 @@ function loadGenres(callback){
     var net=
         new Lampa.Reguest();
 
-    requestCached(
+    requestJson(
         net,
-        'genres',
-        86400000,
         workerUrl(
             'genres'
         ),
+        1440,
 
         function(data){
             genresCache=
@@ -2370,113 +1586,109 @@ function chooseType(){
     );
 }
 
-function topbar(
-    active,
-    homeAction
-){
-    var bar=
-        $('<div class="ah-top"></div>');
+function catalogMenu(){
+    showSelect(
+        'AnimeHub',
 
-    var brand=
-        $('<div class="ah-brand"></div>')
-        .append(
-            toriiSvg(
-                'ah-logo'
-            ),
-
-            '<span class="ah-name">'+
-                'AnimeHub'+
-            '</span>'
-        );
-
-    var nav=
-        $('<div class="ah-nav"></div>');
-
-    function add(
-        key,
-        title,
-        action
-    ){
-        var item=
-            $('<div class="ah-navbtn selector"></div>')
-            .text(
-                title
-            );
-
-        if(
-            active===
-            key
-        ){
-            item.addClass(
-                'active'
-            );
-        }
-
-        item.on(
-            'hover:enter click',
-
-            function(e){
-                if(e){
-                    e.preventDefault();
-                }
-
-                action();
+        [
+            {
+                title:'Все аниме',
+                mode:'all'
+            },
+            {
+                title:'Онгоинги',
+                mode:'ongoing'
+            },
+            {
+                title:'Популярные',
+                mode:'popular'
+            },
+            {
+                title:'Топ-100',
+                mode:'top'
+            },
+            {
+                title:'Новинки',
+                mode:'latest'
+            },
+            {
+                title:'Анонсы',
+                mode:'announcements'
+            },
+            {
+                title:'Жанры',
+                action:'genres'
+            },
+            {
+                title:'Годы',
+                action:'years'
+            },
+            {
+                title:'Тип',
+                action:'types'
+            },
+            {
+                title:'Поиск',
+                action:'search'
+            },
+            {
+                title:'Расписание',
+                action:'schedule'
+            },
+            {
+                title:'Избранное',
+                action:'favorites'
             }
-        );
+        ],
 
-        nav.append(
-            item
-        );
-    }
-
-    add(
-        'home',
-        'Главная',
-        homeAction||
-        openHome
-    );
-
-    add(
-        'catalog',
-        'Каталог',
-
-        function(){
-            openCatalog(
-                'all',
-                '',
-                'Каталог',
-                1
-            );
+        function(x){
+            if(x.mode){
+                openCatalog(
+                    x.mode,
+                    '',
+                    x.title,
+                    1
+                );
+            }
+            else if(
+                x.action===
+                'genres'
+            ){
+                chooseGenre();
+            }
+            else if(
+                x.action===
+                'years'
+            ){
+                chooseYear();
+            }
+            else if(
+                x.action===
+                'types'
+            ){
+                chooseType();
+            }
+            else if(
+                x.action===
+                'search'
+            ){
+                openSearch();
+            }
+            else if(
+                x.action===
+                'schedule'
+            ){
+                openSchedule();
+            }
+            else if(
+                x.action===
+                'favorites'
+            ){
+                openFavorites();
+            }
         }
-    );
-
-    add(
-        'search',
-        'Поиск',
-        openSearch
-    );
-
-    add(
-        'schedule',
-        'Расписание',
-        openSchedule
-    );
-
-    add(
-        'favorites',
-        'Избранное',
-        openFavorites
-    );
-
-    return bar.append(
-        brand,
-        nav
     );
 }
-
-/* ============================================================
- * DETAIL OPEN
- * ============================================================ */
 
 function openDetail(a){
     if(!a){
@@ -2503,7 +1715,9 @@ function openDetail(a){
             page:1,
 
             ah_item:
-                compactAnime(a)
+                compactAnime(
+                    a
+                )
         });
 
         return;
@@ -2527,6 +1741,8 @@ function openDetail(a){
                 }
             ),
 
+            2,
+
             function(data){
                 var items=
                     data.items||
@@ -2549,6 +1765,7 @@ function openDetail(a){
                                 )
                             ){
                                 best=x;
+
                                 return true;
                             }
 
@@ -2584,163 +1801,545 @@ function openDetail(a){
 }
 
 /* ============================================================
- * CARDS
+ * NATIVE CARD DATA
  * ============================================================ */
 
-function wideCard(
+function nativeCard(
     a,
-    state
+    options
 ){
-    var card=
-        $('<div class="ah-wide selector"></div>');
+    options=
+        options||
+        {};
 
-    putImage(
-        card,
-        a.poster,
-        a.title,
-        false
-    );
+    var state=
+        options.state||
+        null;
 
-    card.append(
-        '<div class="ah-cardshade"></div>'
-    );
+    var wide=
+        !!options.wide;
 
-    if(
-        a.status&&
-        a.status.alias===
-        'ongoing'
-    ){
-        card.append(
-            '<div class="ah-badge">'+
-                'ОНГОИНГ'+
-            '</div>'
-        );
-    }
-
-    var meta=[
-        a.year||'',
-
-        typeLabel(a),
-
-        num(
-            a.score,
-            0
-        )>0
-            ?'★ '+
-            score(
-                a.score
-            )
-            :'',
-
-        a.episodes&&
-        a.episodes.aired
-            ?intv(
-                a.episodes.aired,
-                0
-            )+
-            ' сер.'
-            :''
-    ]
-    .filter(Boolean);
+    var title=
+        a.title||
+        'Anime';
 
     if(
         state&&
         state.episode
     ){
-        meta.unshift(
-            'Серия '+
-            state.episode
-        );
+        title+=
+            ' • серия '+
+            state.episode;
     }
 
-    card.append(
-        '<div class="ah-wide-copy">'+
-            '<div class="ah-wide-title">'+
-                esc(
-                    a.title||
-                    'Anime'
+    var card={
+        id:
+            'animehub_'+
+            String(
+                a.id||
+                ''
+            ),
+
+        title:
+            title,
+
+        original_title:
+            a.original||
+            '',
+
+        release_date:
+            a.year
+                ?String(
+                    a.year
                 )+
-            '</div>'+
-            '<div class="ah-smallmeta">'+
-                esc(
-                    meta.join(
-                        ' • '
-                    )
-                )+
-            '</div>'+
-        '</div>'
-    );
+                '-01-01'
+                :'',
+
+        vote_average:
+            num(
+                a.score,
+                0
+            ),
+
+        poster:
+            a.poster||
+            '',
+
+        source:
+            'animehub',
+
+        ahAnime:
+            a,
+
+        params:{
+            style:{
+                name:
+                    wide
+                        ?'wide'
+                        :'default'
+            },
+
+            on:{
+                'hover:enter':
+                    function(){
+                        if(options.enter){
+                            options.enter(
+                                a,
+                                state
+                            );
+                        }
+                        else{
+                            openDetail(
+                                a
+                            );
+                        }
+                    }
+            }
+        }
+    };
+
+    var mask=
+        cardMask();
 
     if(
-        state&&
-        num(
-            state.duration,
-            0
-        )>0&&
-        num(
-            state.position,
-            0
-        )>0&&
-        !state.completed
+        mask!==
+        undefined
     ){
-        var p=
-            Math.max(
-                0,
-
-                Math.min(
-                    100,
-
-                    Math.round(
-                        num(
-                            state.position,
-                            0
-                        )/
-                        num(
-                            state.duration,
-                            1
-                        )*
-                        100
-                    )
-                )
-            );
-
-        card.append(
-            '<div class="ah-progress">'+
-                '<span style="width:'+
-                    p+
-                    '%"></span>'+
-            '</div>'
-        );
+        card.params.module=
+            mask;
     }
 
-    card.on(
-        'hover:enter click',
+    if(wide){
+        card.cover=
+            a.background||
+            a.posterHero||
+            a.poster||
+            '';
 
-        function(e){
-            if(e){
-                e.preventDefault();
-            }
+        card.overview=
+            state&&
+            state.episode
+                ?(
+                    'Продолжить • серия '+
+                    state.episode
+                )
+                :(
+                    [
+                        a.year||'',
+                        typeLabel(a),
 
-            openDetail(a);
-        }
-    );
+                        num(
+                            a.score,
+                            0
+                        )>0
+                            ?'★ '+
+                            score(
+                                a.score
+                            )
+                            :''
+                    ]
+                    .filter(Boolean)
+                    .join(
+                        ' • '
+                    )
+                );
+    }
 
     return card;
 }
 
-function posterCard(a){
-    var card=
-        $('<div class="ah-poster selector"></div>');
+function lineData(
+    title,
+    items,
+    options
+){
+    options=
+        options||
+        {};
 
-    var media=
-        $('<div class="ah-poster-media"></div>');
+    var results=
+        (
+            items||
+            []
+        )
+        .map(
+            function(a){
+                var st=
+                    options.stateMap&&
+                    options.stateMap[
+                        String(
+                            a.id
+                        )
+                    ];
 
-    putImage(
-        media,
-        a.poster,
-        a.title,
-        false
+                return nativeCard(
+                    a,
+
+                    {
+                        wide:
+                            !!options.wide,
+
+                        state:
+                            st,
+
+                        enter:
+                            options.enter
+                    }
+                );
+            }
+        );
+
+    return {
+        title:
+            title,
+
+        results:
+            results,
+
+        total_pages:
+            options.more
+                ?2
+                :1,
+
+        params:{
+            items:{
+                mapping:'line',
+                align_left:false,
+
+                view:
+                    options.view||
+                    6
+            },
+
+            emit:
+                options.more
+                    ?{
+                        onMore:
+                            function(){
+                                options.more();
+                            }
+                    }
+                    :{}
+        }
+    };
+}
+
+function filterCard(){
+    var svg=
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450">'+
+            '<defs>'+
+                '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'+
+                    '<stop stop-color="#7d49e9"/>'+
+                    '<stop offset="1" stop-color="#e65ed1"/>'+
+                '</linearGradient>'+
+            '</defs>'+
+            '<rect width="300" height="450" rx="28" fill="#111527"/>'+
+            '<rect x="36" y="64" width="228" height="322" rx="26" fill="url(#g)" opacity=".24"/>'+
+            '<path d="M64 110h172M82 170h136M101 230h98M120 290h60" stroke="#fff" stroke-width="18" stroke-linecap="round"/>'+
+            '<circle cx="110" cy="110" r="20" fill="#fff"/>'+
+            '<circle cx="176" cy="170" r="20" fill="#fff"/>'+
+            '<circle cx="139" cy="230" r="20" fill="#fff"/>'+
+            '<circle cx="158" cy="290" r="20" fill="#fff"/>'+
+        '</svg>';
+
+    var card={
+        id:
+            'animehub_filter',
+
+        title:
+            'Фильтры / поиск',
+
+        poster:
+            'data:image/svg+xml;charset=utf-8,'+
+            encodeURIComponent(
+                svg
+            ),
+
+        source:
+            'animehub',
+
+        params:{
+            style:{
+                name:'default'
+            },
+
+            on:{
+                'hover:enter':
+                    catalogMenu
+            }
+        }
+    };
+
+    var mask=
+        cardMask();
+
+    if(
+        mask!==
+        undefined
+    ){
+        card.params.module=
+            mask;
+    }
+
+    return card;
+}
+
+/* ============================================================
+ * MINI EMITTER + CUSTOM HERO LINE
+ * ============================================================ */
+
+function MiniEmit(){
+    this.components=[];
+}
+
+MiniEmit.prototype.use=
+function(module){
+    if(
+        module&&
+        this.components.indexOf(
+            module
+        )<
+        0
+    ){
+        this.components.push(
+            module
+        );
+    }
+};
+
+MiniEmit.prototype.emit=
+function(event){
+    var args=
+        Array.prototype.slice.call(
+            arguments,
+            1
+        );
+
+    var name=
+        event.charAt(0)
+            .toUpperCase()+
+        event.slice(1);
+
+    var only=null;
+
+    this.components.forEach(
+        function(c){
+            if(
+                typeof c[
+                    'only'+
+                    name
+                ]===
+                'function'
+            ){
+                only=
+                    c[
+                        'only'+
+                        name
+                    ];
+            }
+        }
     );
+
+    if(only){
+        return only.apply(
+            this,
+            args
+        );
+    }
+
+    var self=
+        this;
+
+    this.components.forEach(
+        function(c){
+            if(
+                typeof c[
+                    'on'+
+                    name
+                ]===
+                'function'
+            ){
+                c[
+                    'on'+
+                    name
+                ]
+                .apply(
+                    self,
+                    args
+                );
+            }
+        }
+    );
+};
+
+function HeroLine(data){
+    MiniEmit.call(
+        this
+    );
+
+    this.data=
+        data;
+
+    this.html=
+        $('<div class="ah130-hero-line"></div>');
+
+    this.last=
+        null;
+}
+
+HeroLine.prototype=
+    Object.create(
+        MiniEmit.prototype
+    );
+
+HeroLine.prototype.constructor=
+    HeroLine;
+
+HeroLine.prototype.create=
+function(){
+    var self=
+        this;
+
+    var a=
+        this.data.hero||
+        {};
+
+    var top=
+        $('<div class="ah130-top"></div>');
+
+    var brand=
+        $('<div class="ah130-brand"></div>')
+        .append(
+            toriiSvg(
+                'ah130-logo'
+            ),
+
+            '<span class="ah130-name">'+
+                'AnimeHub'+
+            '</span>'
+        );
+
+    var nav=
+        $('<div class="ah130-nav"></div>');
+
+    function navButton(
+        title,
+        action
+    ){
+        var b=
+            $('<div class="ah130-navbtn selector"></div>')
+            .text(
+                title
+            );
+
+        b.on(
+            'hover:enter click',
+
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
+
+                action();
+            }
+        );
+
+        nav.append(
+            b
+        );
+    }
+
+    navButton(
+        'Главная',
+        function(){}
+    );
+
+    navButton(
+        'Каталог',
+
+        function(){
+            openCatalog(
+                'all',
+                '',
+                'Каталог',
+                1
+            );
+        }
+    );
+
+    navButton(
+        'Поиск',
+        openSearch
+    );
+
+    navButton(
+        'Расписание',
+        openSchedule
+    );
+
+    navButton(
+        'Избранное',
+        openFavorites
+    );
+
+    top.append(
+        brand,
+        nav
+    );
+
+    var hero=
+        $('<div class="ah130-hero"></div>');
+
+    var bg=
+        a.background||
+        a.posterHero||
+        a.poster||
+        '';
+
+    if(bg){
+        hero.append(
+            imageElement(
+                bg,
+                'ah130-bg'
+            )
+        );
+    }
+
+    hero.append(
+        '<div class="ah130-shade"></div>'
+    );
+
+    var copy=
+        $('<div class="ah130-hero-copy"></div>');
+
+    copy.append(
+        '<div class="ah130-kicker">'+
+            'AnimeHub • YummyAnime'+
+        '</div>'+
+        '<div class="ah130-title">'+
+            esc(
+                a.title||
+                'AnimeHub'
+            )+
+        '</div>'
+    );
+
+    if(
+        a.original&&
+        a.original!==
+        a.title
+    ){
+        copy.append(
+            '<div class="ah130-original">'+
+                esc(
+                    a.original
+                )+
+            '</div>'
+        );
+    }
+
+    var meta=
+        $('<div class="ah130-meta"></div>');
 
     if(
         num(
@@ -2748,43 +2347,94 @@ function posterCard(a){
             0
         )>0
     ){
-        media.append(
-            '<div class="ah-poster-score">'+
+        meta.append(
+            '<span class="ah130-chip ah130-score">'+
                 '★ '+
                 esc(
                     score(
                         a.score
                     )
                 )+
-            '</div>'
+            '</span>'
         );
     }
 
-    card.append(
-        media,
+    if(a.year){
+        meta.append(
+            '<span class="ah130-chip">'+
+                esc(
+                    a.year
+                )+
+            '</span>'
+        );
+    }
 
-        '<div class="ah-poster-title">'+
+    meta.append(
+        '<span class="ah130-chip">'+
             esc(
-                a.title||
-                'Anime'
-            )+
-        '</div>',
-
-        '<div class="ah-poster-meta">'+
-            esc(
-                [
-                    a.year||'',
-                    typeLabel(a)
-                ]
-                .filter(Boolean)
-                .join(
-                    ' • '
+                typeLabel(
+                    a
                 )
+            )+
+        '</span>'
+    );
+
+    if(
+        a.status&&
+        a.status.alias
+    ){
+        meta.append(
+            '<span class="ah130-chip">'+
+                esc(
+                    statusLabel(
+                        a.status.alias
+                    )
+                )+
+            '</span>'
+        );
+    }
+
+    copy.append(
+        meta
+    );
+
+    copy.append(
+        '<div class="ah130-desc">'+
+            esc(
+                clip(
+                    cleanDescription(
+                        a.description
+                    ),
+                    285
+                )||
+                'Откройте карточку для подробностей.'
             )+
         '</div>'
     );
 
-    card.on(
+    var actions=
+        $('<div class="ah130-actions"></div>');
+
+    var watch=
+        $('<div class="ah130-btn primary selector">▶ Смотреть</div>');
+
+    var details=
+        $('<div class="ah130-btn selector">ⓘ Подробнее</div>');
+
+    var fav=
+        $('<div class="ah130-btn selector"></div>');
+
+    function refreshFav(){
+        fav.text(
+            isFavorite(a)
+                ?'★ В избранном'
+                :'☆ В избранное'
+        );
+    }
+
+    refreshFav();
+
+    watch.on(
         'hover:enter click',
 
         function(e){
@@ -2792,101 +2442,754 @@ function posterCard(a){
                 e.preventDefault();
             }
 
-            openDetail(a);
+            watchAnime(
+                a
+            );
         }
     );
 
-    return card;
-}
+    details.on(
+        'hover:enter click',
 
-function shelf(
-    root,
-    title,
-    items,
-    stateMap
-){
-    if(
-        !items||
-        !items.length
-    ){
-        return;
-    }
+        function(e){
+            if(e){
+                e.preventDefault();
+            }
 
-    var section=
-        $(
-            '<div class="ah-shelf">'+
-                '<div class="ah-shelf-title">'+
-                    esc(title)+
-                '</div>'+
-            '</div>'
-        );
+            openDetail(
+                a
+            );
+        }
+    );
 
-    var row=
-        $('<div class="ah-row"></div>');
+    fav.on(
+        'hover:enter click',
 
-    items
-        .slice(
-            0,
-            6
+        function(e){
+            if(e){
+                e.preventDefault();
+            }
+
+            notify(
+                toggleFavorite(a)
+                    ?'Добавлено в избранное'
+                    :'Удалено из избранного'
+            );
+
+            refreshFav();
+        }
+    );
+
+    actions.append(
+        watch,
+        details,
+        fav
+    );
+
+    copy.append(
+        actions
+    );
+
+    hero.append(
+        copy
+    );
+
+    this.html.append(
+        top,
+        hero
+    );
+
+    this.html
+        .find(
+            '.selector'
         )
-        .forEach(
-            function(a){
-                row.append(
-                    wideCard(
-                        a,
+        .on(
+            'hover:focus',
 
-                        stateMap&&
-                        stateMap[
-                            String(
-                                a.id
-                            )
-                        ]
+            function(){
+                self.last=
+                    this;
+            }
+        );
+};
+
+HeroLine.prototype.toggle=
+function(){
+    var self=
+        this;
+
+    this.emit(
+        'active'
+    );
+
+    var controller={
+        link:
+            this,
+
+        toggle:
+            function(){
+                Lampa.Controller.collectionSet(
+                    self.html[0]
+                );
+
+                Lampa.Controller.collectionFocus(
+                    self.last||
+                    self.html.find(
+                        '.selector'
+                    )[0]||
+                    false,
+
+                    self.html[0]
+                );
+
+                self.emit(
+                    'toggle'
+                );
+            },
+
+        left:
+            function(){
+                if(
+                    Navigator.canmove(
+                        'left'
                     )
+                ){
+                    Navigator.move(
+                        'left'
+                    );
+                }
+                else{
+                    self.emit(
+                        'left'
+                    );
+                }
+            },
+
+        right:
+            function(){
+                if(
+                    Navigator.canmove(
+                        'right'
+                    )
+                ){
+                    Navigator.move(
+                        'right'
+                    );
+                }
+            },
+
+        up:
+            function(){
+                if(
+                    Navigator.canmove(
+                        'up'
+                    )
+                ){
+                    Navigator.move(
+                        'up'
+                    );
+                }
+                else{
+                    self.emit(
+                        'up'
+                    );
+                }
+            },
+
+        down:
+            function(){
+                if(
+                    Navigator.canmove(
+                        'down'
+                    )
+                ){
+                    Navigator.move(
+                        'down'
+                    );
+                }
+                else{
+                    self.emit(
+                        'down'
+                    );
+                }
+            },
+
+        back:
+            function(){
+                self.emit(
+                    'back'
                 );
             }
-        );
+    };
 
-    root.append(
-        section.append(
-            row
-        )
+    Lampa.Controller.add(
+        'animehub_hero',
+        controller
     );
-}
 
-function continueShelf(root){
-    var states=
-        continueStates();
-
-    if(!states.length){
-        return;
-    }
-
-    var map={};
-
-    var items=
-        states.map(
-            function(x){
-                map[
-                    String(
-                        x.anime.id
-                    )
-                ]=
-                    x;
-
-                return x.anime;
-            }
-        );
-
-    shelf(
-        root,
-        'Продолжаем смотреть',
-        items,
-        map
+    Lampa.Controller.toggle(
+        'animehub_hero'
     );
+};
+
+HeroLine.prototype.render=
+function(js){
+    return js
+        ?this.html[0]
+        :this.html;
+};
+
+HeroLine.prototype.destroy=
+function(){
+    this.html.remove();
+
+    this.components=[];
+};
+
+function heroLineData(hero){
+    return {
+        title:'',
+        hero:hero,
+        results:[],
+        ahHero:true,
+
+        params:{
+            createInstance:
+                function(data){
+                    return new HeroLine(
+                        data
+                    );
+                }
+        }
+    };
 }
 
 /* ============================================================
- * YUMMYANIME VIDEO HELPERS
+ * HOME - NATIVE MAIN / LINE / CARD
+ * ============================================================ */
+
+function HomeComponent(object){
+    var net=
+        new Lampa.Reguest();
+
+    var comp=
+        Lampa.Maker.make(
+            'Main',
+            object
+        );
+
+    comp.use({
+        onCreate:function(){
+            var self=
+                this;
+
+            requestJson(
+                net,
+                workerUrl(
+                    'home'
+                ),
+                2,
+
+                function(data){
+                    var lines=[];
+
+                    if(data.hero){
+                        lines.push(
+                            heroLineData(
+                                data.hero
+                            )
+                        );
+                    }
+
+                    var states=
+                        continueStates();
+
+                    if(states.length){
+                        var map={};
+
+                        var items=
+                            states.map(
+                                function(x){
+                                    map[
+                                        String(
+                                            x.anime.id
+                                        )
+                                    ]=
+                                        x;
+
+                                    return x.anime;
+                                }
+                            );
+
+                        lines.push(
+                            lineData(
+                                'Продолжаем смотреть',
+                                items,
+
+                                {
+                                    wide:true,
+                                    stateMap:map,
+                                    view:5,
+
+                                    enter:
+                                        function(a){
+                                            openDetail(
+                                                a
+                                            );
+                                        }
+                                }
+                            )
+                        );
+                    }
+
+                    if(
+                        data.ongoing&&
+                        data.ongoing.length
+                    ){
+                        lines.push(
+                            lineData(
+                                'Сейчас выходит',
+                                data.ongoing,
+
+                                {
+                                    view:6,
+
+                                    more:
+                                        function(){
+                                            openCatalog(
+                                                'ongoing',
+                                                '',
+                                                'Онгоинги',
+                                                1
+                                            );
+                                        }
+                                }
+                            )
+                        );
+                    }
+
+                    if(
+                        data.latest&&
+                        data.latest.length
+                    ){
+                        lines.push(
+                            lineData(
+                                'Новинки',
+                                data.latest,
+
+                                {
+                                    view:6,
+
+                                    more:
+                                        function(){
+                                            openCatalog(
+                                                'latest',
+                                                '',
+                                                'Новинки',
+                                                1
+                                            );
+                                        }
+                                }
+                            )
+                        );
+                    }
+
+                    if(
+                        data.top&&
+                        data.top.length
+                    ){
+                        lines.push(
+                            lineData(
+                                'Лучшее',
+                                data.top,
+
+                                {
+                                    view:6,
+
+                                    more:
+                                        function(){
+                                            openCatalog(
+                                                'top',
+                                                '',
+                                                'Топ-100',
+                                                1
+                                            );
+                                        }
+                                }
+                            )
+                        );
+                    }
+
+                    self.build(
+                        lines
+                    );
+                },
+
+                function(){
+                    self.empty(
+                        true
+                    );
+
+                    notify(
+                        'Не удалось загрузить AnimeHub'
+                    );
+                }
+            );
+        },
+
+        onDestroy:function(){
+            try{
+                net.clear();
+            }
+            catch(e){}
+        }
+    });
+
+    return comp;
+}
+
+/* ============================================================
+ * CATALOGUE - NATIVE CATEGORY
+ * ============================================================ */
+
+function catalogResults(
+    data,
+    includeFilter
+){
+    var out=[];
+
+    if(includeFilter){
+        out.push(
+            filterCard()
+        );
+    }
+
+    (
+        data.items||
+        []
+    )
+    .forEach(
+        function(a){
+            out.push(
+                nativeCard(
+                    a
+                )
+            );
+        }
+    );
+
+    return out;
+}
+
+function CatalogComponent(object){
+    object.page=
+        intv(
+            object.ah_page||
+            object.page,
+            1
+        );
+
+    object.params=
+        object.params||
+        {};
+
+    object.params.items={
+        mapping:'grid',
+        cols:5,
+        limit_view:5,
+        limit_collection:30
+    };
+
+    var net=
+        new Lampa.Reguest();
+
+    var comp=
+        Lampa.Maker.make(
+            'Category',
+            object
+        );
+
+    var mode=
+        object.ah_mode||
+        'all';
+
+    var value=
+        object.ah_value||
+        '';
+
+    function loadPage(
+        page,
+        done,
+        fail
+    ){
+        requestJson(
+            net,
+
+            workerUrl(
+                'catalog',
+
+                {
+                    mode:mode,
+                    value:value,
+                    page:page,
+                    limit:10
+                }
+            ),
+
+            3,
+
+            function(data){
+                if(
+                    !data.hasNext
+                ){
+                    comp.total_pages=
+                        page;
+                }
+
+                done({
+                    results:
+                        catalogResults(
+                            data,
+                            page===
+                            1
+                        ),
+
+                    page:
+                        page,
+
+                    total_pages:
+                        data.hasNext
+                            ?9999
+                            :page,
+
+                    total_results:
+                        data.hasNext
+                            ?999999
+                            :(
+                                (
+                                    page-
+                                    1
+                                )*
+                                10+
+                                (
+                                    data.items||
+                                    []
+                                ).length
+                            )
+                });
+            },
+
+            fail
+        );
+    }
+
+    comp.use({
+        onCreate:function(){
+            var self=
+                this;
+
+            loadPage(
+                self.object.page,
+
+                function(data){
+                    self.build(
+                        data
+                    );
+                },
+
+                function(){
+                    self.empty(
+                        true
+                    );
+
+                    notify(
+                        'Не удалось загрузить каталог'
+                    );
+                }
+            );
+        },
+
+        onNext:function(
+            done,
+            fail
+        ){
+            loadPage(
+                this.object.page,
+                done,
+                fail
+            );
+        },
+
+        onDestroy:function(){
+            try{
+                net.clear();
+            }
+            catch(e){}
+        }
+    });
+
+    return comp;
+}
+
+/* ============================================================
+ * FAVORITES / SCHEDULE - NATIVE CATEGORY
+ * ============================================================ */
+
+function FavoritesComponent(object){
+    object.page=
+        1;
+
+    object.params=
+        object.params||
+        {};
+
+    object.params.items={
+        mapping:'grid',
+        cols:5,
+        limit_view:5,
+        limit_collection:30
+    };
+
+    var comp=
+        Lampa.Maker.make(
+            'Category',
+            object
+        );
+
+    comp.use({
+        onCreate:function(){
+            var list=
+                storedList(
+                    FAVORITES_KEY
+                );
+
+            var results=[
+                filterCard()
+            ];
+
+            list
+                .slice(
+                    0,
+                    50
+                )
+                .forEach(
+                    function(a){
+                        results.push(
+                            nativeCard(
+                                a
+                            )
+                        );
+                    }
+                );
+
+            this.build({
+                results:
+                    results,
+
+                page:1,
+                total_pages:1,
+
+                total_results:
+                    list.length
+            });
+        }
+    });
+
+    return comp;
+}
+
+function ScheduleComponent(object){
+    object.page=
+        1;
+
+    object.params=
+        object.params||
+        {};
+
+    object.params.items={
+        mapping:'grid',
+        cols:5,
+        limit_view:5,
+        limit_collection:30
+    };
+
+    var net=
+        new Lampa.Reguest();
+
+    var comp=
+        Lampa.Maker.make(
+            'Category',
+            object
+        );
+
+    comp.use({
+        onCreate:function(){
+            var self=
+                this;
+
+            requestJson(
+                net,
+                workerUrl(
+                    'schedule'
+                ),
+                10,
+
+                function(data){
+                    var results=[
+                        filterCard()
+                    ];
+
+                    (
+                        data.items||
+                        []
+                    )
+                    .forEach(
+                        function(a){
+                            results.push(
+                                nativeCard(
+                                    a
+                                )
+                            );
+                        }
+                    );
+
+                    self.build({
+                        results:
+                            results,
+
+                        page:1,
+                        total_pages:1,
+
+                        total_results:
+                            results.length
+                    });
+                },
+
+                function(){
+                    self.empty(
+                        true
+                    );
+
+                    notify(
+                        'Не удалось загрузить расписание'
+                    );
+                }
+            );
+        },
+
+        onDestroy:function(){
+            try{
+                net.clear();
+            }
+            catch(e){}
+        }
+    });
+
+    return comp;
+}
+
+/* ============================================================
+ * VIDEO HELPERS
  * ============================================================ */
 
 function videoData(video){
@@ -2925,7 +3228,9 @@ function videoData(video){
 
 function normalizeVideoUrl(url){
     url=
-        clean(url);
+        clean(
+            url
+        );
 
     if(!url){
         return '';
@@ -2943,7 +3248,9 @@ function normalizeVideoUrl(url){
 
     if(
         /^http:\/\/(?:www\.)?kodik\./i
-            .test(url)
+            .test(
+                url
+            )
     ){
         return (
             'https://'+
@@ -2960,7 +3267,9 @@ function videoSourceUrl(video){
     }
 
     var d=
-        videoData(video);
+        videoData(
+            video
+        );
 
     return normalizeVideoUrl(
         video.yani_stream_url||
@@ -2990,12 +3299,14 @@ function videoSourceUrl(video){
 
 function videoHost(url){
     try{
-        return new URL(url)
-            .hostname
-            .replace(
-                /^www\./,
-                ''
-            );
+        return new URL(
+            url
+        )
+        .hostname
+        .replace(
+            /^www\./,
+            ''
+        );
     }
     catch(e){
         return '';
@@ -3029,20 +3340,24 @@ function episodeValue(
     }
 
     var m=
-        String(raw)
-            .match(
-                /\d+(?:[.,]\d+)?/
-            );
+        String(
+            raw
+        )
+        .match(
+            /\d+(?:[.,]\d+)?/
+        );
 
     return m
         ?parseFloat(
             m[0]
-                .replace(
-                    ',',
-                    '.'
-                )
+            .replace(
+                ',',
+                '.'
+            )
         )
-        :String(raw);
+        :String(
+            raw
+        );
 }
 
 function sourceKind(
@@ -3050,7 +3365,9 @@ function sourceKind(
     video
 ){
     var d=
-        videoData(video);
+        videoData(
+            video
+        );
 
     var value=
         (
@@ -3079,42 +3396,54 @@ function sourceKind(
 
     if(
         /\.(m3u8|mpd|mp4|webm)(?:[?#].*)?$/i
-            .test(url)
+            .test(
+                url
+            )
     ){
         return 'direct';
     }
 
     if(
         /iframecvh|cdnvideohub|(?:^|\s)cvh(?:\s|$)/i
-            .test(value)
+            .test(
+                value
+            )
     ){
         return 'cvh';
     }
 
     if(
         /iframevk|vkvideo|vk\.com|video_ext\.php|(?:^|\s)vk(?:\s|$)/i
-            .test(value)
+            .test(
+                value
+            )
     ){
         return 'vk';
     }
 
     if(
         /kodik/i
-            .test(value)
+            .test(
+                value
+            )
     ){
         return 'kodik';
     }
 
     if(
         /aksor/i
-            .test(value)
+            .test(
+                value
+            )
     ){
         return 'aksor';
     }
 
     if(
         /rutube/i
-            .test(value)
+            .test(
+                value
+            )
     ){
         return 'rutube';
     }
@@ -3122,23 +3451,22 @@ function sourceKind(
     return 'unsupported';
 }
 
-function groupPart(v){
-    return clean(v)
-        .toLowerCase();
-}
-
 function voiceName(video){
     var d=
-        videoData(video);
+        videoData(
+            video
+        );
 
     return clean(
         d.dubbing||
         d.translation||
         d.voice||
         d.voice_name||
+
         video.dubbing||
         video.translation||
         video.voice||
+
         d.player||
         'Источник'
     )
@@ -3146,6 +3474,13 @@ function voiceName(video){
         /^\ufeff/,
         ''
     );
+}
+
+function groupPart(v){
+    return clean(
+        v
+    )
+    .toLowerCase();
 }
 
 function groupVideos(videos){
@@ -3211,10 +3546,14 @@ function groupVideos(videos){
                     provider
                 );
 
-            if(!groups[key]){
+            if(
+                !groups[key]
+            ){
                 groups[key]={
                     key:key,
-                    title:voice,
+
+                    title:
+                        voice,
 
                     player:
                         clean(
@@ -3242,75 +3581,77 @@ function groupVideos(videos){
         }
     );
 
-    return Object.keys(groups)
-        .map(
-            function(k){
-                var g=
-                    groups[k];
+    var priority={
+        direct:6,
+        cvh:5,
+        vk:4,
+        kodik:3,
+        aksor:2,
+        rutube:1,
+        unsupported:0
+    };
 
-                g.videos.sort(
-                    function(a,b){
-                        return (
-                            num(
-                                a._ahEpisode,
-                                99999
-                            )-
-                            num(
-                                b._ahEpisode,
-                                99999
-                            )||
-                            intv(
-                                a.index,
-                                0
-                            )-
-                            intv(
-                                b.index,
-                                0
-                            )
-                        );
-                    }
-                );
+    return Object.keys(
+        groups
+    )
+    .map(
+        function(k){
+            var g=
+                groups[k];
 
-                return g;
-            }
-        )
-        .sort(
-            function(a,b){
-                var priority={
-                    direct:6,
-                    cvh:5,
-                    vk:4,
-                    kodik:3,
-                    aksor:2,
-                    rutube:1,
-                    unsupported:0
-                };
+            g.videos.sort(
+                function(a,b){
+                    return (
+                        num(
+                            a._ahEpisode,
+                            99999
+                        )-
+                        num(
+                            b._ahEpisode,
+                            99999
+                        )||
+                        intv(
+                            a.index,
+                            0
+                        )-
+                        intv(
+                            b.index,
+                            0
+                        )
+                    );
+                }
+            );
 
-                return (
-                    (
-                        priority[
-                            b.kind
-                        ]||
-                        0
-                    )-
-                    (
-                        priority[
-                            a.kind
-                        ]||
-                        0
-                    )||
+            return g;
+        }
+    )
+    .sort(
+        function(a,b){
+            return (
+                (
+                    priority[
+                        b.kind
+                    ]||
+                    0
+                )-
+                (
+                    priority[
+                        a.kind
+                    ]||
+                    0
+                )||
+                clean(
+                    a.title
+                )
+                .localeCompare(
                     clean(
-                        a.title
-                    )
-                    .localeCompare(
-                        clean(
-                            b.title
-                        ),
-                        'ru'
-                    )
-                );
-            }
-        );
+                        b.title
+                    ),
+                    'ru'
+                )
+            );
+        }
+    );
 }
 
 function episodeNumbers(videos){
@@ -3333,9 +3674,13 @@ function episodeNumbers(videos){
                 );
 
             var key=
-                String(ep);
+                String(
+                    ep
+                );
 
-            if(!seen[key]){
+            if(
+                !seen[key]
+            ){
                 seen[key]=1;
 
                 out.push(
@@ -3378,7 +3723,9 @@ function findVideo(
                 String(
                     video._ahEpisode
                 )===
-                String(ep)||
+                String(
+                    ep
+                )||
                 Math.abs(
                     num(
                         video._ahEpisode,
@@ -3413,26 +3760,30 @@ function groupsForEpisode(
     )
     .filter(
         function(g){
-            return !!findVideo(
-                g,
-                ep
+            return (
+                !!findVideo(
+                    g,
+                    ep
+                )&&
+                g.kind!==
+                'unsupported'
             );
         }
     );
 }
-
-/* ============================================================
- * VIDEO REQUEST CACHE
- * ============================================================ */
 
 function cacheVideos(
     id,
     videos
 ){
     id=
-        String(id);
+        String(
+            id
+        );
 
-    if(videoCache[id]){
+    if(
+        videoCache[id]
+    ){
         videoOrder=
             videoOrder.filter(
                 function(x){
@@ -3502,7 +3853,9 @@ function loadVideos(
         return;
     }
 
-    if(videoInflight[id]){
+    if(
+        videoInflight[id]
+    ){
         videoInflight[id]
             .push({
                 ok:ok,
@@ -3541,10 +3894,13 @@ function loadVideos(
 
         workerUrl(
             'videos',
+
             {
                 id:id
             }
         ),
+
+        0,
 
         function(data){
             if(
@@ -3622,7 +3978,7 @@ function loadVideos(
 }
 
 /* ============================================================
- * PLAYBACK UX
+ * PLAYBACK
  * ============================================================ */
 
 function restoreContent(){
@@ -3648,7 +4004,9 @@ function currentOrFirstEpisode(
             videos
         );
 
-    if(!eps.length){
+    if(
+        !eps.length
+    ){
         return null;
     }
 
@@ -3664,7 +4022,9 @@ function currentOrFirstEpisode(
         );
 
     if(
-        eps.indexOf(ep)<
+        eps.indexOf(
+            ep
+        )<
         0
     ){
         ep=
@@ -3705,17 +4065,11 @@ function chooseSourceForEpisode(
         groupsForEpisode(
             videos,
             ep
-        )
-        .filter(
-            function(g){
-                return (
-                    g.kind!==
-                    'unsupported'
-                );
-            }
         );
 
-    if(!groups.length){
+    if(
+        !groups.length
+    ){
         notify(
             'Для этой серии нет поддерживаемого источника'
         );
@@ -3732,14 +4086,18 @@ function chooseSourceForEpisode(
 
     var preferred=null;
 
-    if(state.providerKey){
+    if(
+        state.providerKey
+    ){
         groups.some(
             function(g){
                 if(
                     g.key===
                     state.providerKey
                 ){
-                    preferred=g;
+                    preferred=
+                        g;
+
                     return true;
                 }
 
@@ -3755,6 +4113,7 @@ function chooseSourceForEpisode(
         resolveAndPlay(
             anime,
             preferred,
+
             findVideo(
                 preferred,
                 ep
@@ -3818,7 +4177,6 @@ function chooseSourceForEpisode(
                         )
                     );
                 },
-
                 0
             );
         },
@@ -3838,7 +4196,9 @@ function watchAnime(
                 list
             );
 
-        if(!eps.length){
+        if(
+            !eps.length
+        ){
             notify(
                 'Видео для этого тайтла не найдено'
             );
@@ -3866,7 +4226,8 @@ function watchAnime(
             num(
                 state.episode,
                 0
-            )>0;
+            )>
+            0;
 
         chooseSourceForEpisode(
             anime,
@@ -3880,24 +4241,23 @@ function watchAnime(
         go(
             videos
         );
-
-        return;
     }
+    else{
+        loadVideos(
+            anime,
+            go,
 
-    loadVideos(
-        anime,
-        go,
+            function(){
+                notify(
+                    'Не удалось загрузить источники'
+                );
 
-        function(){
-            notify(
-                'Не удалось загрузить источники'
-            );
+                restoreContent();
+            },
 
-            restoreContent();
-        },
-
-        true
-    );
+            true
+        );
+    }
 }
 
 function changeSource(
@@ -4066,6 +4426,8 @@ function resolveAndPlay(
                     ''
             }
         ),
+
+        0,
 
         function(result){
             try{
@@ -4312,7 +4674,9 @@ function launchPlayer(
             Lampa.Player.playlist
         ){
             Lampa.Player.playlist(
-                [item]
+                [
+                    item
+                ]
             );
         }
     }
@@ -4330,10 +4694,6 @@ function launchPlayer(
     }
 }
 
-/* ============================================================
- * PROGRESS TRACKER
- * ============================================================ */
-
 function installPlaybackTracker(){
     var key=
         NS+
@@ -4349,7 +4709,8 @@ function installPlaybackTracker(){
         return;
     }
 
-    window[key]=true;
+    window[key]=
+        true;
 
     Lampa.Player.listener.follow(
         'start',
@@ -4436,22 +4797,20 @@ function installPlaybackTracker(){
             }
 
             function ended(){
-                if(!active){
-                    return;
+                if(active){
+                    saveWatchState(
+                        anime,
+
+                        {
+                            episode:
+                                episode,
+
+                            position:0,
+                            duration:0,
+                            completed:true
+                        }
+                    );
                 }
-
-                saveWatchState(
-                    anime,
-
-                    {
-                        episode:
-                            episode,
-
-                        position:0,
-                        duration:0,
-                        completed:true
-                    }
-                );
             }
 
             function destroy(){
@@ -4495,392 +4854,39 @@ function installPlaybackTracker(){
 }
 
 /* ============================================================
- * HOME
+ * DETAIL - CUSTOM HERO + LAMPA SCROLL + NATIVE LINES
  * ============================================================ */
 
-function HomeComponent(){
-    var net=
-        new Lampa.Reguest();
+function detailNav(){
+    var top=
+        $('<div class="ah130-detail-top"></div>');
 
-    var alive=false;
-
-    var view=
-        $('<div class="ah-view"></div>');
-
-    var root=
-        $('<div class="ah-page"></div>');
-
-    var focus={
-        last:null
-    };
-
-    function render(data){
-        if(!alive){
-            return;
-        }
-
-        root
-            .empty()
-            .append(
-                topbar(
-                    'home',
-                    function(){}
-                )
-            );
-
-        var anime=
-            data.hero;
-
-        if(anime){
-            var hero=
-                $('<div class="ah-hero"></div>');
-
-            var bg=
-                anime.background||
-                anime.posterHero||
-                anime.poster||
-                '';
-
-            if(bg){
-                putBackground(
-                    hero,
-                    bg
-                );
-            }
-
-            hero.append(
-                '<div class="ah-shade"></div>'
-            );
-
-            var content=
-                $('<div class="ah-hero-copy"></div>');
-
-            content.append(
-                '<div class="ah-kicker">'+
-                    'Сейчас в центре внимания'+
-                '</div>'+
-                '<div class="ah-title">'+
-                    esc(
-                        anime.title||
-                        'AnimeHub'
-                    )+
-                '</div>'
-            );
-
-            if(
-                anime.original&&
-                anime.original!==
-                anime.title
-            ){
-                content.append(
-                    '<div class="ah-original">'+
-                        esc(
-                            anime.original
-                        )+
-                    '</div>'
-                );
-            }
-
-            var meta=
-                $('<div class="ah-meta"></div>');
-
-            if(
-                num(
-                    anime.score,
-                    0
-                )>0
-            ){
-                meta.append(
-                    '<span class="ah-chip ah-score">'+
-                        '★ '+
-                        esc(
-                            score(
-                                anime.score
-                            )
-                        )+
-                    '</span>'
-                );
-            }
-
-            if(anime.year){
-                meta.append(
-                    '<span class="ah-chip">'+
-                        esc(
-                            anime.year
-                        )+
-                    '</span>'
-                );
-            }
-
-            meta.append(
-                '<span class="ah-chip">'+
-                    esc(
-                        typeLabel(
-                            anime
-                        )
-                    )+
-                '</span>'
-            );
-
-            if(
-                anime.episodes&&
-                anime.episodes.aired
-            ){
-                meta.append(
-                    '<span class="ah-chip">'+
-                        esc(
-                            episodeCount(
-                                anime
-                            )
-                        )+
-                        ' сер.'+
-                    '</span>'
-                );
-            }
-
-            content.append(
-                meta,
-
-                '<div class="ah-description">'+
-                    esc(
-                        clip(
-                            cleanDescription(
-                                anime.description
-                            ),
-                            270
-                        )||
-                        'Откройте карточку для подробностей.'
-                    )+
-                '</div>'
-            );
-
-            var actions=
-                $('<div class="ah-actions"></div>');
-
-            $(
-                '<div class="ah-button primary selector">'+
-                    '▶ Смотреть'+
-                '</div>'
-            )
-            .on(
-                'hover:enter click',
-
-                function(e){
-                    if(e){
-                        e.preventDefault();
-                    }
-
-                    watchAnime(
-                        anime
-                    );
-                }
-            )
-            .appendTo(
-                actions
-            );
-
-            $(
-                '<div class="ah-button selector">'+
-                    'ⓘ Подробнее'+
-                '</div>'
-            )
-            .on(
-                'hover:enter click',
-
-                function(e){
-                    if(e){
-                        e.preventDefault();
-                    }
-
-                    openDetail(
-                        anime
-                    );
-                }
-            )
-            .appendTo(
-                actions
-            );
-
-            content.append(
-                actions
-            );
-
-            hero.append(
-                content
-            );
-
-            root.append(
-                hero
-            );
-        }
-
-        continueShelf(
-            root
-        );
-
-        shelf(
-            root,
-            'Сейчас выходит',
-            data.ongoing||
-            []
-        );
-
-        shelf(
-            root,
-            'Новинки',
-            data.latest||
-            []
-        );
-
-        shelf(
-            root,
-            'Лучшее',
-            data.top||
-            []
-        );
-
-        bindFocus(
-            root,
-            view,
-            focus
-        );
-
-        focusFirst(
-            root,
-            focus
-        );
-    }
-
-    this.create=function(){
-        alive=true;
-
-        view.append(
-            root
-        );
-
-        root.append(
-            topbar(
-                'home',
-                function(){}
+    var brand=
+        $('<div class="ah130-brand"></div>')
+        .append(
+            toriiSvg(
+                'ah130-logo'
             ),
 
-            loaderHtml(
-                'Загрузка AnimeHub…'
-            )
+            '<span class="ah130-name">'+
+                'AnimeHub'+
+            '</span>'
         );
 
-        requestCached(
-            net,
-            'home',
-            120000,
-            workerUrl(
-                'home'
-            ),
-            render,
+    var nav=
+        $('<div class="ah130-nav"></div>');
 
-            function(){
-                root.html(
-                    '<div class="ah-empty">'+
-                        'Не удалось загрузить AnimeHub'+
-                    '</div>'
-                );
-            }
-        );
-
-        return view;
-    };
-
-    this.start=function(){
-        if(
-            Lampa.Activity.active().activity===
-            this.activity
-        ){
-            installController(
-                view,
-                root,
-                focus,
-
-                function(){
-                    Lampa.Activity.backward();
-                }
-            );
-        }
-    };
-
-    this.pause=function(){};
-    this.stop=function(){};
-
-    this.render=function(){
-        return view;
-    };
-
-    this.destroy=function(){
-        alive=false;
-        net.clear();
-        view.remove();
-    };
-}
-
-/* ============================================================
- * CATALOG
- * ============================================================ */
-
-function CatalogComponent(object){
-    var net=
-        new Lampa.Reguest();
-
-    var alive=false;
-
-    var view=
-        $('<div class="ah-view"></div>');
-
-    var root=
-        $('<div class="ah-page"></div>');
-
-    var focus={
-        last:null
-    };
-
-    var mode=
-        object.ah_mode||
-        'all';
-
-    var value=
-        object.ah_value||
-        '';
-
-    var title=
-        object.ah_title||
-        'Каталог';
-
-    var page=
-        intv(
-            object.ah_page,
-            1
-        );
-
-    function filter(
-        side,
-        key,
-        label,
+    function add(
+        title,
         action
     ){
-        var button=
-            $('<div class="ah-filter selector"></div>')
+        var b=
+            $('<div class="ah130-navbtn selector"></div>')
             .text(
-                label
+                title
             );
 
-        if(
-            mode===
-            key
-        ){
-            button.addClass(
-                'selected'
-            );
-        }
-
-        button.on(
+        b.on(
             'hover:enter click',
 
             function(e){
@@ -4892,403 +4898,65 @@ function CatalogComponent(object){
             }
         );
 
-        side.append(
-            button
+        nav.append(
+            b
         );
     }
 
-    function render(data){
-        if(!alive){
-            return;
-        }
+    add(
+        'Главная',
+        openHome
+    );
 
-        root
-            .empty()
-            .append(
-                topbar(
-                    mode==='search'
-                        ?'search'
-                        :'catalog'
-                ),
+    add(
+        'Каталог',
 
-                '<div class="ah-head">'+
-                    '<div class="ah-page-title">'+
-                        esc(
-                            title
-                        )+
-                    '</div>'+
-                    '<div class="ah-page-sub">'+
-                        'Страница '+
-                        page+
-                        ' • '+
-                        (
-                            data.items||
-                            []
-                        ).length+
-                        ' тайтлов'+
-                    '</div>'+
-                '</div>'
-            );
-
-        var layout=
-            $('<div class="ah-catalog"></div>');
-
-        var side=
-            $('<div class="ah-side"></div>');
-
-        filter(
-            side,
-            'all',
-            'Все аниме',
-
-            function(){
-                openCatalog(
-                    'all',
-                    '',
-                    'Каталог',
-                    1
-                );
-            }
-        );
-
-        filter(
-            side,
-            'ongoing',
-            'Онгоинги',
-
-            function(){
-                openCatalog(
-                    'ongoing',
-                    '',
-                    'Онгоинги',
-                    1
-                );
-            }
-        );
-
-        filter(
-            side,
-            'popular',
-            'Популярные',
-
-            function(){
-                openCatalog(
-                    'popular',
-                    '',
-                    'Популярные',
-                    1
-                );
-            }
-        );
-
-        filter(
-            side,
-            'top',
-            'Топ-100',
-
-            function(){
-                openCatalog(
-                    'top',
-                    '',
-                    'Топ-100',
-                    1
-                );
-            }
-        );
-
-        filter(
-            side,
-            'latest',
-            'Новинки',
-
-            function(){
-                openCatalog(
-                    'latest',
-                    '',
-                    'Новинки',
-                    1
-                );
-            }
-        );
-
-        filter(
-            side,
-            'announcements',
-            'Анонсы',
-
-            function(){
-                openCatalog(
-                    'announcements',
-                    '',
-                    'Анонсы',
-                    1
-                );
-            }
-        );
-
-        filter(
-            side,
-            'genre',
-            'Жанры',
-            chooseGenre
-        );
-
-        filter(
-            side,
-            'year',
-            'Годы',
-            chooseYear
-        );
-
-        filter(
-            side,
-            'type',
-            'Тип',
-            chooseType
-        );
-
-        var main=
-            $('<div class="ah-main"></div>');
-
-        var grid=
-            $('<div class="ah-grid"></div>');
-
-        (
-            data.items||
-            []
-        )
-        .forEach(
-            function(a){
-                grid.append(
-                    posterCard(
-                        a
-                    )
-                );
-            }
-        );
-
-        main.append(
-            grid
-        );
-
-        var pages=
-            $('<div class="ah-pages"></div>');
-
-        if(
-            page>
-            1
-        ){
-            $(
-                '<div class="ah-pagebtn selector">'+
-                    '← '+
-                    (
-                        page-
-                        1
-                    )+
-                '</div>'
-            )
-            .on(
-                'hover:enter click',
-
-                function(){
-                    openCatalog(
-                        mode,
-                        value,
-                        title,
-                        page-
-                        1
-                    );
-                }
-            )
-            .appendTo(
-                pages
+        function(){
+            openCatalog(
+                'all',
+                '',
+                'Каталог',
+                1
             );
         }
+    );
 
-        if(data.hasNext){
-            $(
-                '<div class="ah-pagebtn selector">'+
-                    (
-                        page+
-                        1
-                    )+
-                    ' →'+
-                '</div>'
-            )
-            .on(
-                'hover:enter click',
+    add(
+        'Поиск',
+        openSearch
+    );
 
-                function(){
-                    openCatalog(
-                        mode,
-                        value,
-                        title,
-                        page+
-                        1
-                    );
-                }
-            )
-            .appendTo(
-                pages
-            );
-        }
+    add(
+        'Расписание',
+        openSchedule
+    );
 
-        main.append(
-            pages
-        );
+    add(
+        'Избранное',
+        openFavorites
+    );
 
-        root.append(
-            layout.append(
-                side,
-                main
-            )
-        );
+    top.append(
+        brand,
+        nav
+    );
 
-        bindFocus(
-            root,
-            view,
-            focus
-        );
-
-        setTimeout(
-            function(){
-                var first=
-                    grid.find(
-                        '.selector'
-                    )[0]||
-                    side.find(
-                        '.selector'
-                    )[0]||
-                    root.find(
-                        '.selector'
-                    )[0];
-
-                if(first){
-                    focus.last=
-                        first;
-
-                    try{
-                        Lampa.Controller.collectionSet(
-                            root
-                        );
-
-                        Lampa.Controller.collectionFocus(
-                            first,
-                            root
-                        );
-                    }
-                    catch(e){}
-                }
-            },
-
-            25
-        );
-    }
-
-    this.create=function(){
-        alive=true;
-
-        view.append(
-            root
-        );
-
-        root.append(
-            topbar(
-                'catalog'
-            ),
-
-            loaderHtml(
-                'Загрузка каталога…'
-            )
-        );
-
-        requestCached(
-            net,
-
-            'cat:'+
-            mode+
-            ':'+
-            value+
-            ':'+
-            page,
-
-            90000,
-
-            workerUrl(
-                'catalog',
-
-                {
-                    mode:mode,
-                    value:value,
-                    page:page,
-                    limit:10
-                }
-            ),
-
-            render,
-
-            function(){
-                root.html(
-                    '<div class="ah-empty">'+
-                        'Не удалось загрузить каталог'+
-                    '</div>'
-                );
-            }
-        );
-
-        return view;
-    };
-
-    this.start=function(){
-        if(
-            Lampa.Activity.active().activity===
-            this.activity
-        ){
-            installController(
-                view,
-                root,
-                focus,
-
-                function(){
-                    Lampa.Activity.backward();
-                }
-            );
-        }
-    };
-
-    this.pause=function(){};
-    this.stop=function(){};
-
-    this.render=function(){
-        return view;
-    };
-
-    this.destroy=function(){
-        alive=false;
-        net.clear();
-        view.remove();
-    };
+    return top;
 }
-
-/* ============================================================
- * DETAIL
- * ============================================================ */
 
 function DetailComponent(object){
     var net=
         new Lampa.Reguest();
 
-    var alive=false;
-
-    var view=
-        $('<div class="ah-view"></div>');
+    var scroll=
+        new Lampa.Scroll({
+            mask:true,
+            over:true,
+            step:250
+        });
 
     var root=
-        $('<div class="ah-page"></div>');
-
-    var focus={
-        last:null
-    };
+        $('<div class="ah130-detail-wrap"></div>');
 
     var initial=
         object.ah_item||
@@ -5296,10 +4964,151 @@ function DetailComponent(object){
 
     var anime=null;
     var videos=null;
-    var episodeBox=null;
-    var recommendationBox=null;
-    var watchButton=null;
-    var sourceButton=null;
+    var last=null;
+
+    var episodeBlock=null;
+    var recommendBlock=null;
+
+    var episodeLine=null;
+    var recommendLine=null;
+
+    var selectedRangeStart=null;
+
+    var alive=false;
+
+    function bindFocus(){
+        root
+            .off(
+                'hover:focus.'+
+                NS
+            )
+            .on(
+                'hover:focus.'+
+                NS,
+
+                '.selector',
+
+                function(){
+                    last=
+                        this;
+
+                    try{
+                        scroll.update(
+                            this
+                        );
+                    }
+                    catch(e){}
+                }
+            );
+    }
+
+    function startController(){
+        Lampa.Controller.add(
+            'content',
+
+            {
+                link:
+                    this,
+
+                toggle:
+                    function(){
+                        try{
+                            scroll.restorePosition();
+
+                            Lampa.Controller.collectionSet(
+                                scroll.render(
+                                    true
+                                )
+                            );
+
+                            Lampa.Controller.collectionFocus(
+                                last||
+                                root.find(
+                                    '.selector'
+                                )[0]||
+                                false,
+
+                                scroll.render(
+                                    true
+                                )
+                            );
+                        }
+                        catch(e){}
+                    },
+
+                left:
+                    function(){
+                        if(
+                            Navigator.canmove(
+                                'left'
+                            )
+                        ){
+                            Navigator.move(
+                                'left'
+                            );
+                        }
+                        else{
+                            Lampa.Controller.toggle(
+                                'menu'
+                            );
+                        }
+                    },
+
+                right:
+                    function(){
+                        if(
+                            Navigator.canmove(
+                                'right'
+                            )
+                        ){
+                            Navigator.move(
+                                'right'
+                            );
+                        }
+                    },
+
+                up:
+                    function(){
+                        if(
+                            Navigator.canmove(
+                                'up'
+                            )
+                        ){
+                            Navigator.move(
+                                'up'
+                            );
+                        }
+                        else{
+                            Lampa.Controller.toggle(
+                                'head'
+                            );
+                        }
+                    },
+
+                down:
+                    function(){
+                        if(
+                            Navigator.canmove(
+                                'down'
+                            )
+                        ){
+                            Navigator.move(
+                                'down'
+                            );
+                        }
+                    },
+
+                back:
+                    function(){
+                        Lampa.Activity.backward();
+                    }
+            }
+        );
+
+        Lampa.Controller.toggle(
+            'content'
+        );
+    }
 
     function infoRow(
         panel,
@@ -5315,7 +5124,7 @@ function DetailComponent(object){
         }
 
         panel.append(
-            '<div class="ah-info">'+
+            '<div class="ah130-info">'+
                 '<span>'+
                     esc(
                         label
@@ -5331,17 +5140,17 @@ function DetailComponent(object){
     }
 
     function infoPanel(a){
-        var panel=
+        var p=
             $(
-                '<div class="ah-aside">'+
-                    '<div class="ah-aside-title">'+
+                '<div class="ah130-aside">'+
+                    '<div class="ah130-aside-title">'+
                         'Информация'+
                     '</div>'+
                 '</div>'
             );
 
         infoRow(
-            panel,
+            p,
             'Рейтинг',
 
             num(
@@ -5360,7 +5169,7 @@ function DetailComponent(object){
             a.studios.length
         ){
             infoRow(
-                panel,
+                p,
                 'Студия',
 
                 a.studios
@@ -5380,7 +5189,7 @@ function DetailComponent(object){
             a.creators.length
         ){
             infoRow(
-                panel,
+                p,
                 'Режиссёр',
 
                 a.creators
@@ -5396,13 +5205,15 @@ function DetailComponent(object){
         }
 
         infoRow(
-            panel,
+            p,
             'Тип',
-            typeLabel(a)
+            typeLabel(
+                a
+            )
         );
 
         infoRow(
-            panel,
+            p,
             'Статус',
 
             statusLabel(
@@ -5412,15 +5223,18 @@ function DetailComponent(object){
         );
 
         infoRow(
-            panel,
+            p,
             'Эпизоды',
-            episodeCount(a)
+            episodeCount(
+                a
+            )
         );
 
         if(a.duration){
             infoRow(
-                panel,
+                p,
                 'Длительность',
+
                 a.duration+
                 ' мин.'
             );
@@ -5431,7 +5245,7 @@ function DetailComponent(object){
             a.age.title
         ){
             infoRow(
-                panel,
+                p,
                 'Возраст',
                 a.age.title
             );
@@ -5442,7 +5256,7 @@ function DetailComponent(object){
             a.episodes.nextDate
         ){
             infoRow(
-                panel,
+                p,
                 'Следующая',
 
                 formatDate(
@@ -5452,17 +5266,13 @@ function DetailComponent(object){
             );
         }
 
-        return panel;
+        return p;
     }
 
-    function refreshWatchButtons(){
-        if(
-            !anime||
-            !watchButton
-        ){
-            return;
-        }
-
+    function refreshMainButtons(
+        watchBtn,
+        sourceBtn
+    ){
         var state=
             watchState(
                 anime
@@ -5474,32 +5284,32 @@ function DetailComponent(object){
                 0
             );
 
-        watchButton.text(
+        watchBtn.text(
             ep&&
             !state.completed
                 ?(
                     '▶ Продолжить • серия '+
                     ep
                 )
-                :ep&&
-                state.completed
-                    ?'▶ Смотреть дальше'
-                    :'▶ Смотреть'
+                :(
+                    ep&&
+                    state.completed
+                        ?'▶ Смотреть дальше'
+                        :'▶ Смотреть'
+                )
         );
 
-        if(sourceButton){
-            sourceButton.text(
-                ep
-                    ?(
-                        '🎧 Озвучка / источник • серия '+
-                        ep
-                    )
-                    :'🎧 Озвучка / источник'
-            );
-        }
+        sourceBtn.text(
+            ep
+                ?(
+                    '🎧 Озвучка / источник • серия '+
+                    ep
+                )
+                :'🎧 Озвучка / источник'
+        );
     }
 
-    function screenshotForEpisode(
+    function screenshotFor(
         ep,
         index
     ){
@@ -5524,7 +5334,9 @@ function DetailComponent(object){
                     )<
                     0.0001
                 ){
-                    exact=x;
+                    exact=
+                        x;
+
                     return true;
                 }
 
@@ -5555,6 +5367,160 @@ function DetailComponent(object){
             );
     }
 
+    function destroyEpisodeLine(){
+        if(episodeLine){
+            try{
+                episodeLine.destroy();
+            }
+            catch(e){}
+
+            episodeLine=
+                null;
+        }
+    }
+
+    function destroyRecommendLine(){
+        if(recommendLine){
+            try{
+                recommendLine.destroy();
+            }
+            catch(e){}
+
+            recommendLine=
+                null;
+        }
+    }
+
+    function episodeRangeItems(eps){
+        var max=40;
+
+        if(
+            eps.length<=
+            max
+        ){
+            return {
+                start:0,
+                items:eps
+            };
+        }
+
+        if(
+            selectedRangeStart!=
+            null
+        ){
+            var s=
+                Math.max(
+                    0,
+
+                    Math.min(
+                        intv(
+                            selectedRangeStart,
+                            0
+                        ),
+
+                        eps.length-
+                        max
+                    )
+                );
+
+            return {
+                start:s,
+
+                items:
+                    eps.slice(
+                        s,
+                        s+
+                        max
+                    )
+            };
+        }
+
+        var current=
+            num(
+                watchState(
+                    anime
+                ).episode,
+                0
+            );
+
+        var idx=
+            eps.indexOf(
+                current
+            );
+
+        var start=
+            idx>=0
+                ?Math.max(
+                    0,
+
+                    Math.min(
+                        eps.length-
+                        max,
+                        idx-
+                        8
+                    )
+                )
+                :0;
+
+        return {
+            start:
+                start,
+
+            items:
+                eps.slice(
+                    start,
+                    start+
+                    max
+                )
+        };
+    }
+
+    function chooseRange(eps){
+        var size=40;
+        var items=[];
+
+        for(
+            var s=0;
+            s<eps.length;
+            s+=size
+        ){
+            var end=
+                Math.min(
+                    eps.length,
+                    s+
+                    size
+                );
+
+            items.push({
+                title:
+                    'Серии '+
+                    (
+                        s+
+                        1
+                    )+
+                    '–'+
+                    end,
+
+                start:
+                    s
+            });
+        }
+
+        showSelect(
+            'Диапазон серий',
+            items,
+
+            function(x){
+                selectedRangeStart=
+                    x.start;
+
+                renderEpisodes(
+                    videos
+                );
+            }
+        );
+    }
+
     function renderEpisodes(list){
         videos=
             list||
@@ -5565,308 +5531,183 @@ function DetailComponent(object){
                 videos
             );
 
-        if(!eps.length){
-            episodeBox.html(
-                '<div class="ah-placeholder">'+
+        destroyEpisodeLine();
+
+        episodeBlock.empty();
+
+        episodeBlock.append(
+            '<div class="ah130-block-title">'+
+                'Эпизоды'+
+            '</div>'
+        );
+
+        if(
+            !eps.length
+        ){
+            episodeBlock.append(
+                '<div class="ah130-placeholder">'+
                     'Видео пока не найдено.'+
                 '</div>'
             );
 
-            bindFocus(
-                root,
-                view,
-                focus
-            );
+            bindFocus();
 
             return;
         }
 
-        var state=
-            watchState(
-                anime
-            );
-
-        var current=
-            num(
-                state.episode,
-                0
-            );
-
-        var index=
-            eps.indexOf(
-                current
-            );
-
-        var start=0;
-        var max=8;
-
         if(
             eps.length>
-            max&&
-            index>=0
+            40
         ){
-            start=
-                Math.max(
-                    0,
+            var rangeBtn=
+                $('<div class="ah130-lazy selector">Диапазон серий</div>');
 
-                    Math.min(
-                        eps.length-
-                        max,
+            rangeBtn.on(
+                'hover:enter click',
 
-                        index-
-                        3
-                    )
-                );
+                function(e){
+                    if(e){
+                        e.preventDefault();
+                    }
+
+                    chooseRange(
+                        eps
+                    );
+                }
+            );
+
+            episodeBlock.append(
+                $(
+                    '<div class="ah130-placeholder">'+
+                        '<span>'+
+                            'Всего серий: '+
+                            eps.length+
+                        '</span>'+
+                    '</div>'
+                )
+                .append(
+                    rangeBtn
+                )
+            );
         }
 
-        var subset=
-            eps.slice(
-                start,
-                start+
-                max
+        var range=
+            episodeRangeItems(
+                eps
             );
 
-        var label=
-            eps.length>
-            max
-                ?(
-                    start+
-                    1
-                )+
-                '–'+
-                (
-                    start+
-                    subset.length
-                )+
-                ' из '+
-                eps.length
-                :String(
-                    eps.length
-                );
-
-        var head=
-            $(
-                '<div class="ah-ephead">'+
-                    '<div>'+
-                        '<span class="ah-eptitle">'+
-                            'Эпизоды'+
-                        '</span>'+
-                        '<span class="ah-epcount">'+
-                            esc(
-                                label
-                            )+
-                        '</span>'+
-                    '</div>'+
-                '</div>'
-            );
-
-        var all=
-            $(
-                '<div class="ah-all selector">'+
-                    'Все серии ›'+
-                '</div>'
-            );
-
-        all.on(
-            'hover:enter click',
-
-            function(e){
-                if(e){
-                    e.preventDefault();
-                }
-
-                showSelect(
-                    'Эпизоды',
-
-                    eps.map(
-                        function(ep){
-                            return {
-                                title:
-                                    'Серия '+
-                                    ep,
-
-                                episode:
-                                    ep
-                            };
-                        }
-                    ),
-
-                    function(item){
-                        setTimeout(
-                            function(){
-                                chooseSourceForEpisode(
-                                    anime,
-                                    videos,
-                                    item.episode,
-                                    true
-                                );
-                            },
-
-                            0
-                        );
-                    }
-                );
-            }
-        );
-
-        head.append(
-            all
-        );
-
-        var row=
-            $('<div class="ah-eprow"></div>');
-
-        subset.forEach(
-            function(
-                ep,
-                j
-            ){
-                var groups=
-                    groupsForEpisode(
-                        videos,
-                        ep
-                    )
-                    .filter(
-                        function(g){
-                            return (
-                                g.kind!==
-                                'unsupported'
-                            );
-                        }
-                    );
-
-                var card=
-                    $('<div class="ah-ep selector"></div>');
-
-                var image=
-                    screenshotForEpisode(
-                        ep,
-                        start+
-                        j
-                    );
-
-                if(image){
-                    putImage(
-                        card,
-                        image,
-                        'Серия '+
-                        ep,
-                        false
-                    );
-                }
-
-                card.append(
-                    '<div class="ah-cardshade"></div>'+
-                    '<div class="ah-epnum">'+
-                        esc(ep)+
-                    '</div>'+
-                    '<div class="ah-epcopy">'+
-                        '<div class="ah-epname">'+
-                            'Серия '+
-                            esc(ep)+
-                        '</div>'+
-                        '<div class="ah-epmeta">'+
-                            esc(
-                                groups.length+
-                                ' источн.'+
-                                (
-                                    groups[0]
-                                        ?' • '+
-                                        groups[0].title
-                                        :''
-                                )
-                            )+
-                        '</div>'+
-                    '</div>'
-                );
-
-                if(
-                    Math.abs(
-                        current-
-                        num(
-                            ep,
-                            0
-                        )
-                    )<
-                    0.0001&&
-                    num(
-                        state.duration,
-                        0
-                    )>0&&
-                    num(
-                        state.position,
-                        0
-                    )>0
+        var cards=
+            range.items.map(
+                function(
+                    ep,
+                    index
                 ){
-                    var p=
-                        state.completed
-                            ?100
-                            :Math.max(
-                                0,
+                    var groups=
+                        groupsForEpisode(
+                            videos,
+                            ep
+                        );
 
-                                Math.min(
-                                    100,
+                    var poster=
+                        screenshotFor(
+                            ep,
+                            range.start+
+                            index
+                        );
 
-                                    Math.round(
-                                        num(
-                                            state.position,
-                                            0
-                                        )/
-                                        num(
-                                            state.duration,
-                                            1
-                                        )*
-                                        100
-                                    )
-                                )
-                            );
+                    var fake={
+                        id:
+                            String(
+                                anime.id
+                            )+
+                            '_ep_'+
+                            ep,
 
-                    card.append(
-                        '<div class="ah-progress">'+
-                            '<span style="width:'+
-                                p+
-                                '%"></span>'+
-                        '</div>'
+                        title:
+                            'Серия '+
+                            ep,
+
+                        original:'',
+                        year:null,
+                        score:0,
+
+                        poster:
+                            poster,
+
+                        background:
+                            poster,
+
+                        posterHero:
+                            poster,
+
+                        type:{
+                            name:
+                                groups.length+
+                                ' источн.'
+                        }
+                    };
+
+                    return nativeCard(
+                        fake,
+
+                        {
+                            wide:true,
+
+                            enter:
+                                function(){
+                                    chooseSourceForEpisode(
+                                        anime,
+                                        videos,
+                                        ep,
+                                        true
+                                    );
+                                }
+                        }
                     );
                 }
-
-                card.on(
-                    'hover:enter click',
-
-                    function(e){
-                        if(e){
-                            e.preventDefault();
-                        }
-
-                        chooseSourceForEpisode(
-                            anime,
-                            videos,
-                            ep,
-                            true
-                        );
-                    }
-                );
-
-                row.append(
-                    card
-                );
-            }
-        );
-
-        episodeBox
-            .empty()
-            .append(
-                head,
-                row
             );
 
-        bindFocus(
-            root,
-            view,
-            focus
+        var data={
+            title:'',
+            results:cards,
+            total_pages:1,
+
+            params:{
+                items:{
+                    mapping:'line',
+                    align_left:false,
+                    view:6
+                }
+            }
+        };
+
+        episodeLine=
+            Lampa.Maker.make(
+                'Line',
+                data
+            );
+
+        episodeLine.create();
+
+        episodeBlock.append(
+            episodeLine.render()
         );
 
-        refreshWatchButtons();
+        try{
+            episodeLine.visible();
+        }
+        catch(e){}
+
+        bindFocus();
+
+        try{
+            Lampa.Controller.collectionSet(
+                scroll.render(
+                    true
+                )
+            );
+        }
+        catch(e){}
     }
 
     function loadEpisodes(){
@@ -5878,12 +5719,11 @@ function DetailComponent(object){
             return;
         }
 
-        episodeBox.html(
-            '<div class="ah-eptitle">'+
+        episodeBlock.html(
+            '<div class="ah130-block-title">'+
                 'Эпизоды'+
             '</div>'+
-            '<div class="ah-placeholder">'+
-                '<div class="ah-spinner"></div>'+
+            '<div class="ah130-placeholder">'+
                 'Загружаем серии…'+
             '</div>'
         );
@@ -5900,30 +5740,36 @@ function DetailComponent(object){
             },
 
             function(){
-                if(alive){
-                    episodeBox.html(
-                        '<div class="ah-placeholder">'+
-                            'Не удалось загрузить серии. '+
-                            '<div class="ah-lazybtn selector">'+
-                                'Повторить'+
-                            '</div>'+
-                        '</div>'
-                    );
-
-                    episodeBox.find(
-                        '.ah-lazybtn'
-                    )
-                    .on(
-                        'hover:enter click',
-                        loadEpisodes
-                    );
-
-                    bindFocus(
-                        root,
-                        view,
-                        focus
-                    );
+                if(!alive){
+                    return;
                 }
+
+                episodeBlock.html(
+                    '<div class="ah130-block-title">'+
+                        'Эпизоды'+
+                    '</div>'
+                );
+
+                var retry=
+                    $('<div class="ah130-lazy selector">Повторить загрузку серий</div>');
+
+                retry.on(
+                    'hover:enter click',
+                    loadEpisodes
+                );
+
+                episodeBlock.append(
+                    $(
+                        '<div class="ah130-placeholder">'+
+                            'Не удалось загрузить серии.'+
+                        '</div>'
+                    )
+                    .append(
+                        retry
+                    )
+                );
+
+                bindFocus();
             },
 
             false
@@ -5931,75 +5777,100 @@ function DetailComponent(object){
     }
 
     function loadRecommendations(){
-        if(
-            recommendationBox.data(
-                'loaded'
-            )
-        ){
+        if(recommendLine){
             return;
         }
 
-        recommendationBox.data(
-            'loaded',
-            1
-        );
-
-        recommendationBox.html(
-            '<div class="ah-placeholder">'+
-                '<div class="ah-spinner"></div>'+
-                'Загружаем похожие аниме…'+
+        recommendBlock.html(
+            '<div class="ah130-block-title">'+
+                'Похожие аниме'+
+            '</div>'+
+            '<div class="ah130-placeholder">'+
+                'Загружаем…'+
             '</div>'
         );
 
         var req=
             new Lampa.Reguest();
 
-        requestCached(
+        requestJson(
             req,
-
-            'rec:'+
-            anime.id,
-
-            600000,
 
             workerUrl(
                 'recommendations',
+
                 {
                     id:
                         anime.id
                 }
             ),
 
+            20,
+
             function(data){
                 if(!alive){
                     return;
                 }
 
-                recommendationBox.empty();
+                recommendBlock
+                    .empty()
+                    .append(
+                        '<div class="ah130-block-title">'+
+                            'Похожие аниме'+
+                        '</div>'
+                    );
+
+                var items=
+                    data.items||
+                    [];
 
                 if(
-                    data.items&&
-                    data.items.length
+                    !items.length
                 ){
-                    shelf(
-                        recommendationBox,
-                        'Похожие аниме',
-                        data.items
-                    );
-                }
-                else{
-                    recommendationBox.append(
-                        '<div class="ah-empty">'+
+                    recommendBlock.append(
+                        '<div class="ah130-placeholder">'+
                             'Похожих аниме не найдено.'+
                         '</div>'
                     );
+
+                    return;
                 }
 
-                bindFocus(
-                    root,
-                    view,
-                    focus
+                recommendLine=
+                    Lampa.Maker.make(
+                        'Line',
+
+                        lineData(
+                            '',
+                            items,
+
+                            {
+                                view:6
+                            }
+                        )
+                    );
+
+                recommendLine.create();
+
+                recommendBlock.append(
+                    recommendLine.render()
                 );
+
+                try{
+                    recommendLine.visible();
+                }
+                catch(e){}
+
+                bindFocus();
+
+                try{
+                    Lampa.Controller.collectionSet(
+                        scroll.render(
+                            true
+                        )
+                    );
+                }
+                catch(e){}
 
                 try{
                     req.clear();
@@ -6008,8 +5879,11 @@ function DetailComponent(object){
             },
 
             function(){
-                recommendationBox.html(
-                    '<div class="ah-empty">'+
+                recommendBlock.html(
+                    '<div class="ah130-block-title">'+
+                        'Похожие аниме'+
+                    '</div>'+
+                    '<div class="ah130-placeholder">'+
                         'Не удалось загрузить похожие аниме.'+
                     '</div>'
                 );
@@ -6023,12 +5897,11 @@ function DetailComponent(object){
     }
 
     function render(a){
-        if(!alive){
-            return;
-        }
+        anime=
+            a;
 
-        anime=a;
-        videos=null;
+        videos=
+            null;
 
         saveRecent(
             a
@@ -6037,11 +5910,11 @@ function DetailComponent(object){
         root
             .empty()
             .append(
-                topbar('')
+                detailNav()
             );
 
         var hero=
-            $('<div class="ah-detail"></div>');
+            $('<div class="ah130-detail"></div>');
 
         var bg=
             a.background||
@@ -6050,38 +5923,45 @@ function DetailComponent(object){
             '';
 
         if(bg){
-            putBackground(
-                hero,
-                bg
+            hero.append(
+                imageElement(
+                    bg,
+                    'ah130-bg'
+                )
             );
         }
 
         hero.append(
-            '<div class="ah-shade"></div>'
+            '<div class="ah130-shade"></div>'
         );
 
-        var wrap=
-            $('<div class="ah-detail-copywrap"></div>');
+        var inner=
+            $('<div class="ah130-detail-inner"></div>');
 
         var poster=
-            $('<div class="ah-detail-poster"></div>');
+            $('<div class="ah130-poster"></div>');
 
-        putImage(
-            poster,
+        if(
             a.posterDetail||
-            a.poster,
-            a.title,
-            true
-        );
+            a.poster
+        ){
+            poster.append(
+                imageElement(
+                    a.posterDetail||
+                    a.poster,
+                    ''
+                )
+            );
+        }
 
         var main=
-            $('<div class="ah-detail-main"></div>');
+            $('<div class="ah130-detail-main"></div>');
 
         main.append(
-            '<div class="ah-kicker">'+
+            '<div class="ah130-kicker">'+
                 'AnimeHub • YummyAnime'+
             '</div>'+
-            '<div class="ah-detail-title">'+
+            '<div class="ah130-detail-title">'+
                 esc(
                     a.title||
                     'Anime'
@@ -6095,7 +5975,7 @@ function DetailComponent(object){
             a.title
         ){
             main.append(
-                '<div class="ah-original">'+
+                '<div class="ah130-original">'+
                     esc(
                         a.original
                     )+
@@ -6104,7 +5984,7 @@ function DetailComponent(object){
         }
 
         var meta=
-            $('<div class="ah-meta"></div>');
+            $('<div class="ah130-meta"></div>');
 
         if(
             num(
@@ -6113,7 +5993,7 @@ function DetailComponent(object){
             )>0
         ){
             meta.append(
-                '<span class="ah-chip ah-score">'+
+                '<span class="ah130-chip ah130-score">'+
                     '★ '+
                     esc(
                         score(
@@ -6126,7 +6006,7 @@ function DetailComponent(object){
 
         if(a.year){
             meta.append(
-                '<span class="ah-chip">'+
+                '<span class="ah130-chip">'+
                     esc(
                         a.year
                     )+
@@ -6135,9 +6015,11 @@ function DetailComponent(object){
         }
 
         meta.append(
-            '<span class="ah-chip">'+
+            '<span class="ah130-chip">'+
                 esc(
-                    typeLabel(a)
+                    typeLabel(
+                        a
+                    )
                 )+
             '</span>'
         );
@@ -6147,7 +6029,7 @@ function DetailComponent(object){
             a.status.alias
         ){
             meta.append(
-                '<span class="ah-chip">'+
+                '<span class="ah130-chip">'+
                     esc(
                         statusLabel(
                             a.status.alias
@@ -6162,7 +6044,7 @@ function DetailComponent(object){
             a.age.title
         ){
             meta.append(
-                '<span class="ah-chip">'+
+                '<span class="ah130-chip">'+
                     esc(
                         a.age.title
                     )+
@@ -6179,7 +6061,7 @@ function DetailComponent(object){
             a.studios.length
         ){
             main.append(
-                '<div class="ah-studio">'+
+                '<div class="ah130-studio">'+
                     'Студия: '+
                     esc(
                         a.studios
@@ -6197,7 +6079,7 @@ function DetailComponent(object){
         }
 
         var genres=
-            $('<div class="ah-meta"></div>');
+            $('<div class="ah130-meta"></div>');
 
         (
             a.genres||
@@ -6210,7 +6092,7 @@ function DetailComponent(object){
         .forEach(
             function(g){
                 genres.append(
-                    '<span class="ah-chip">'+
+                    '<span class="ah130-chip">'+
                         esc(
                             g.title
                         )+
@@ -6230,7 +6112,7 @@ function DetailComponent(object){
             );
 
         main.append(
-            '<div class="ah-description">'+
+            '<div class="ah130-desc">'+
                 esc(
                     description
                         ?clip(
@@ -6243,55 +6125,19 @@ function DetailComponent(object){
         );
 
         var actions=
-            $('<div class="ah-actions"></div>');
+            $('<div class="ah130-actions"></div>');
 
-        watchButton=
-            $(
-                '<div class="ah-button primary selector">'+
-                    '▶ Смотреть'+
-                '</div>'
-            )
-            .on(
-                'hover:enter click',
+        var watchBtn=
+            $('<div class="ah130-btn primary selector">▶ Смотреть</div>');
 
-                function(e){
-                    if(e){
-                        e.preventDefault();
-                    }
+        var sourceBtn=
+            $('<div class="ah130-btn selector">🎧 Озвучка / источник</div>');
 
-                    watchAnime(
-                        anime,
-                        videos
-                    );
-                }
-            );
-
-        sourceButton=
-            $(
-                '<div class="ah-button selector">'+
-                    '🎧 Озвучка / источник'+
-                '</div>'
-            )
-            .on(
-                'hover:enter click',
-
-                function(e){
-                    if(e){
-                        e.preventDefault();
-                    }
-
-                    changeSource(
-                        anime,
-                        videos
-                    );
-                }
-            );
-
-        var fav=
-            $('<div class="ah-button selector"></div>');
+        var favBtn=
+            $('<div class="ah130-btn selector"></div>');
 
         function refreshFav(){
-            fav.text(
+            favBtn.text(
                 isFavorite(
                     anime
                 )
@@ -6302,7 +6148,42 @@ function DetailComponent(object){
 
         refreshFav();
 
-        fav.on(
+        refreshMainButtons(
+            watchBtn,
+            sourceBtn
+        );
+
+        watchBtn.on(
+            'hover:enter click',
+
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
+
+                watchAnime(
+                    anime,
+                    videos
+                );
+            }
+        );
+
+        sourceBtn.on(
+            'hover:enter click',
+
+            function(e){
+                if(e){
+                    e.preventDefault();
+                }
+
+                changeSource(
+                    anime,
+                    videos
+                );
+            }
+        );
+
+        favBtn.on(
             'hover:enter click',
 
             function(e){
@@ -6323,50 +6204,38 @@ function DetailComponent(object){
         );
 
         actions.append(
-            watchButton,
-            sourceButton,
-            fav
+            watchBtn,
+            sourceBtn,
+            favBtn
         );
 
         main.append(
             actions
         );
 
-        wrap.append(
+        inner.append(
             poster,
             main,
-            infoPanel(a)
+            infoPanel(
+                a
+            )
         );
 
         hero.append(
-            wrap
+            inner
         );
 
         root.append(
             hero
         );
 
-        episodeBox=
-            $('<div class="ah-shelf"></div>');
+        episodeBlock=
+            $('<div class="ah130-block"></div>');
 
-        episodeBox.append(
-            '<div class="ah-eptitle">'+
-                'Эпизоды'+
-            '</div>'+
-            '<div class="ah-placeholder">'+
-                '<span>'+
-                    'Серии загружаются только когда нужны — быстрее для TV.'+
-                '</span>'+
-                '<div class="ah-lazybtn selector">'+
-                    'Загрузить серии'+
-                '</div>'+
-            '</div>'
-        );
+        var loadEp=
+            $('<div class="ah130-lazy selector">Загрузить серии</div>');
 
-        episodeBox.find(
-            '.ah-lazybtn'
-        )
-        .on(
+        loadEp.on(
             'hover:enter click',
 
             function(e){
@@ -6378,22 +6247,42 @@ function DetailComponent(object){
             }
         );
 
+        episodeBlock.append(
+            '<div class="ah130-block-title">'+
+                'Эпизоды'+
+            '</div>',
+
+            $(
+                '<div class="ah130-placeholder">'+
+                    '<span>'+
+                        'Не загружаем видео автоматически — быстрее для TV.'+
+                    '</span>'+
+                '</div>'
+            )
+            .append(
+                loadEp
+            )
+        );
+
         root.append(
-            episodeBox
+            episodeBlock
         );
 
         if(
             a.screenshots&&
             a.screenshots.length
         ){
-            root.append(
-                '<div class="ah-block-title">'+
-                    'Кадры'+
-                '</div>'
-            );
-
             var shots=
-                $('<div class="ah-shots"></div>');
+                $(
+                    '<div class="ah130-block">'+
+                        '<div class="ah130-block-title">'+
+                            'Кадры'+
+                        '</div>'+
+                    '</div>'
+                );
+
+            var row=
+                $('<div class="ah130-shots"></div>');
 
             a.screenshots
                 .slice(
@@ -6403,21 +6292,30 @@ function DetailComponent(object){
                 .forEach(
                     function(s){
                         var box=
-                            $('<div class="ah-shot"></div>');
+                            $('<div class="ah130-shot"></div>');
 
-                        putImage(
-                            box,
+                        if(
                             s.small||
-                            s.full,
-                            'Кадр',
-                            false
-                        );
+                            s.full
+                        ){
+                            box.append(
+                                imageElement(
+                                    s.small||
+                                    s.full,
+                                    ''
+                                )
+                            );
+                        }
 
-                        shots.append(
+                        row.append(
                             box
                         );
                     }
                 );
+
+            shots.append(
+                row
+            );
 
             root.append(
                 shots
@@ -6429,38 +6327,26 @@ function DetailComponent(object){
             500
         ){
             root.append(
-                '<div class="ah-block-title">'+
-                    'Описание'+
-                '</div>'+
-                '<div class="ah-longdesc">'+
-                    esc(
-                        description
-                    )+
+                '<div class="ah130-block">'+
+                    '<div class="ah130-block-title">'+
+                        'Описание'+
+                    '</div>'+
+                    '<div class="ah130-longdesc">'+
+                        esc(
+                            description
+                        )+
+                    '</div>'+
                 '</div>'
             );
         }
 
-        recommendationBox=
-            $('<div class="ah-shelf"></div>');
+        recommendBlock=
+            $('<div class="ah130-block"></div>');
 
-        recommendationBox.append(
-            '<div class="ah-block-title">'+
-                'Похожие аниме'+
-            '</div>'+
-            '<div class="ah-placeholder">'+
-                '<span>'+
-                    'Не загружены автоматически.'+
-                '</span>'+
-                '<div class="ah-lazybtn selector">'+
-                    'Показать похожие'+
-                '</div>'+
-            '</div>'
-        );
+        var recBtn=
+            $('<div class="ah130-lazy selector">Показать похожие</div>');
 
-        recommendationBox.find(
-            '.ah-lazybtn'
-        )
-        .on(
+        recBtn.on(
             'hover:enter click',
 
             function(e){
@@ -6472,100 +6358,93 @@ function DetailComponent(object){
             }
         );
 
+        recommendBlock.append(
+            '<div class="ah130-block-title">'+
+                'Похожие аниме'+
+            '</div>',
+
+            $(
+                '<div class="ah130-placeholder">'+
+                    '<span>'+
+                        'Загружаются только по запросу.'+
+                    '</span>'+
+                '</div>'
+            )
+            .append(
+                recBtn
+            )
+        );
+
         root.append(
-            recommendationBox
+            recommendBlock
         );
 
-        refreshWatchButtons();
+        bindFocus();
 
-        bindFocus(
-            root,
-            view,
-            focus
-        );
+        last=
+            watchBtn[0]||
+            root.find(
+                '.selector'
+            )[0]||
+            null;
 
-        setTimeout(
-            function(){
-                var first=
-                    root.find(
-                        '.ah-button.selector'
-                    )[0]||
-                    root.find(
-                        '.selector'
-                    )[0];
-
-                if(first){
-                    focus.last=
-                        first;
-
-                    try{
-                        Lampa.Controller.collectionSet(
-                            root
-                        );
-
-                        Lampa.Controller.collectionFocus(
-                            first,
-                            root
-                        );
-                    }
-                    catch(e){}
-                }
-            },
-
-            25
-        );
+        try{
+            Lampa.Controller.collectionSet(
+                scroll.render(
+                    true
+                )
+            );
+        }
+        catch(e){}
     }
 
     this.create=function(){
         alive=true;
 
-        view.append(
+        scroll.minus();
+
+        scroll.append(
             root
         );
 
-        root.append(
-            topbar(''),
-
+        root.html(
             loaderHtml(
                 'Загрузка карточки…'
             )
         );
 
-        requestCached(
+        requestJson(
             net,
-
-            'detail:'+
-            String(
-                initial.id||
-                ''
-            ),
-
-            480000,
 
             workerUrl(
                 'anime',
+
                 {
                     id:
                         initial.id
                 }
             ),
 
+            8,
+
             function(data){
-                render(
-                    data.anime
-                );
+                if(alive){
+                    render(
+                        data.anime
+                    );
+                }
             },
 
             function(){
                 root.html(
-                    '<div class="ah-empty">'+
-                        'Не удалось загрузить карточку'+
+                    '<div class="ah130-placeholder">'+
+                        'Не удалось загрузить карточку.'+
                     '</div>'
                 );
             }
         );
 
-        return view;
+        return scroll.render();
     };
 
     this.start=function(){
@@ -6576,361 +6455,80 @@ function DetailComponent(object){
             return;
         }
 
-        installController(
-            view,
-            root,
-            focus,
-
-            function(){
-                Lampa.Activity.backward();
-            }
+        startController.call(
+            this
         );
-
-        refreshWatchButtons();
     };
 
-    this.pause=function(){};
-    this.stop=function(){};
+    this.pause=
+        function(){};
 
-    this.render=function(){
-        return view;
-    };
+    this.stop=
+        function(){};
 
-    this.destroy=function(){
-        alive=false;
-        net.clear();
-        view.remove();
-    };
+    this.render=
+        function(){
+            return scroll.render();
+        };
+
+    this.destroy=
+        function(){
+            alive=false;
+
+            try{
+                net.clear();
+            }
+            catch(e){}
+
+            destroyEpisodeLine();
+            destroyRecommendLine();
+
+            try{
+                scroll.destroy();
+            }
+            catch(e){}
+
+            root.remove();
+        };
 }
 
 /* ============================================================
- * SCHEDULE
- * ============================================================ */
-
-function ScheduleComponent(){
-    var net=
-        new Lampa.Reguest();
-
-    var alive=false;
-
-    var view=
-        $('<div class="ah-view"></div>');
-
-    var root=
-        $('<div class="ah-page"></div>');
-
-    var focus={
-        last:null
-    };
-
-    function render(data){
-        if(!alive){
-            return;
-        }
-
-        root
-            .empty()
-            .append(
-                topbar(
-                    'schedule'
-                ),
-
-                '<div class="ah-head">'+
-                    '<div class="ah-page-title">'+
-                        'Расписание'+
-                    '</div>'+
-                    '<div class="ah-page-sub">'+
-                        'Ближайшие выходы серий'+
-                    '</div>'+
-                '</div>'
-            );
-
-        var grid=
-            $('<div class="ah-schgrid"></div>');
-
-        (
-            data.items||
-            []
-        )
-        .slice(
-            0,
-            20
-        )
-        .forEach(
-            function(a){
-                var card=
-                    $('<div class="ah-sch selector"></div>');
-
-                if(a.poster){
-                    putImage(
-                        card,
-                        a.poster,
-                        a.title,
-                        false
-                    );
-                }
-
-                card.append(
-                    '<div class="ah-schcopy">'+
-                        '<div class="ah-schtitle">'+
-                            esc(
-                                a.title
-                            )+
-                        '</div>'+
-                        '<div class="ah-smallmeta">'+
-                            esc(
-                                formatDate(
-                                    a.episodes&&
-                                    a.episodes.nextDate,
-                                    true
-                                )
-                            )+
-                        '</div>'+
-                    '</div>'
-                );
-
-                card.on(
-                    'hover:enter click',
-
-                    function(e){
-                        if(e){
-                            e.preventDefault();
-                        }
-
-                        openDetail(
-                            a
-                        );
-                    }
-                );
-
-                grid.append(
-                    card
-                );
-            }
-        );
-
-        root.append(
-            grid
-        );
-
-        bindFocus(
-            root,
-            view,
-            focus
-        );
-
-        focusFirst(
-            root,
-            focus
-        );
-    }
-
-    this.create=function(){
-        alive=true;
-
-        view.append(
-            root
-        );
-
-        root.append(
-            topbar(
-                'schedule'
-            ),
-
-            loaderHtml(
-                'Загрузка расписания…'
-            )
-        );
-
-        requestCached(
-            net,
-            'schedule',
-            600000,
-            workerUrl(
-                'schedule'
-            ),
-            render,
-
-            function(){
-                root.html(
-                    '<div class="ah-empty">'+
-                        'Не удалось загрузить расписание'+
-                    '</div>'
-                );
-            }
-        );
-
-        return view;
-    };
-
-    this.start=function(){
-        if(
-            Lampa.Activity.active().activity===
-            this.activity
-        ){
-            installController(
-                view,
-                root,
-                focus,
-
-                function(){
-                    Lampa.Activity.backward();
-                }
-            );
-        }
-    };
-
-    this.pause=function(){};
-    this.stop=function(){};
-
-    this.render=function(){
-        return view;
-    };
-
-    this.destroy=function(){
-        alive=false;
-        net.clear();
-        view.remove();
-    };
-}
-
-/* ============================================================
- * FAVORITES
- * ============================================================ */
-
-function FavoritesComponent(){
-    var alive=false;
-
-    var view=
-        $('<div class="ah-view"></div>');
-
-    var root=
-        $('<div class="ah-page"></div>');
-
-    var focus={
-        last:null
-    };
-
-    function render(){
-        if(!alive){
-            return;
-        }
-
-        var items=
-            storedList(
-                FAVORITES_KEY
-            );
-
-        root
-            .empty()
-            .append(
-                topbar(
-                    'favorites'
-                ),
-
-                '<div class="ah-head">'+
-                    '<div class="ah-page-title">'+
-                        'Избранное'+
-                    '</div>'+
-                    '<div class="ah-page-sub">'+
-                        items.length+
-                        ' тайтлов'+
-                    '</div>'+
-                '</div>'
-            );
-
-        if(!items.length){
-            root.append(
-                '<div class="ah-empty">'+
-                    'Добавьте аниме в избранное из карточки.'+
-                '</div>'
-            );
-        }
-        else{
-            var grid=
-                $('<div class="ah-grid"></div>');
-
-            items
-                .slice(
-                    0,
-                    20
-                )
-                .forEach(
-                    function(a){
-                        grid.append(
-                            posterCard(
-                                a
-                            )
-                        );
-                    }
-                );
-
-            root.append(
-                grid
-            );
-        }
-
-        bindFocus(
-            root,
-            view,
-            focus
-        );
-
-        focusFirst(
-            root,
-            focus
-        );
-    }
-
-    this.create=function(){
-        alive=true;
-
-        view.append(
-            root
-        );
-
-        render();
-
-        return view;
-    };
-
-    this.start=function(){
-        if(
-            Lampa.Activity.active().activity===
-            this.activity
-        ){
-            render();
-
-            installController(
-                view,
-                root,
-                focus,
-
-                function(){
-                    Lampa.Activity.backward();
-                }
-            );
-        }
-    };
-
-    this.pause=function(){};
-    this.stop=function(){};
-
-    this.render=function(){
-        return view;
-    };
-
-    this.destroy=function(){
-        alive=false;
-        view.remove();
-    };
-}
-
-/* ============================================================
- * MENU + BOOT
+ * MENU / BOOT
  * ============================================================ */
 
 function addMenuButton(){
+    if(
+        window[
+            NS+
+            '_menu'
+        ]
+    ){
+        return;
+    }
+
+    window[
+        NS+
+        '_menu'
+    ]=
+        true;
+
+    if(
+        Lampa.Menu&&
+        typeof Lampa.Menu.addButton===
+        'function'
+    ){
+        try{
+            Lampa.Menu.addButton(
+                toriiSvg(''),
+                'AnimeHub',
+                openHome
+            );
+
+            return;
+        }
+        catch(e){}
+    }
+
     if(
         $(
             '.menu .menu__list [data-action="'+
@@ -6980,7 +6578,20 @@ function init(){
     window[
         NS+
         '_ready'
-    ]=true;
+    ]=
+        true;
+
+    if(
+        !nativeReady()
+    ){
+        notify(
+            'AnimeHub V'+
+            VERSION+
+            ' требует Lampa 3.0+'
+        );
+
+        return;
+    }
 
     try{
         injectStyle();
@@ -7017,7 +6628,7 @@ function init(){
         notify(
             'AnimeHub V'+
             VERSION+
-            ' TV Fast загружен'
+            ' Native загружен'
         );
     }
     catch(e){
@@ -7033,7 +6644,9 @@ function init(){
     }
 }
 
-if(window.appready){
+if(
+    window.appready
+){
     init();
 }
 else{
@@ -7043,7 +6656,8 @@ else{
         function(e){
             if(
                 e&&
-                e.type==='ready'
+                e.type===
+                'ready'
             ){
                 init();
             }
