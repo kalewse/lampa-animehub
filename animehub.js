@@ -2,7 +2,7 @@
 'use strict';
 
 /*
- * AnimeHub V1.4.0 Native Catalogue
+ * AnimeHub V1.4.1 Native Catalogue
  *
  * Performance first:
  * - Native Lampa Maker Main/Line/Card/Category
@@ -12,10 +12,16 @@
  * - video/recommendations lazy
  * - native genre/collection catalogues
  * - combined filters + sorting
+ *
+ * V1.4.1:
+ * - Fix genre labels
+ * - Defensive client genre normalisation
+ * - New /genres cache schema key so LG/Lampa does not reuse
+ *   the older cached blank-title genre response
  */
 
-var VERSION='1.4.0';
-var NS='animehub_v140';
+var VERSION='1.4.1';
+var NS='animehub_v141';
 
 var HOME=NS+'_home';
 var CATALOG=NS+'_catalog';
@@ -40,6 +46,8 @@ var videoInflight={};
 
 var genresCache=null;
 var CARD_MASK=null;
+
+var GENRE_CACHE_SCHEMA='141';
 
 
 /* ============================================================
@@ -95,10 +103,7 @@ function esc(v){
     .replace(/'/g,'&#39;');
 }
 
-function clip(
-    v,
-    l
-){
+function clip(v,l){
     v=clean(v);
 
     return (
@@ -107,21 +112,12 @@ function clip(
     )
         ?v
         :v
-            .slice(
-                0,
-                l
-            )
-            .replace(
-                /\s+\S*$/,
-                ''
-            )+
+            .slice(0,l)
+            .replace(/\s+\S*$/,'')+
             '…';
 }
 
-function num(
-    v,
-    d
-){
+function num(v,d){
     v=parseFloat(v);
 
     return isNaN(v)
@@ -132,10 +128,7 @@ function num(
         :v;
 }
 
-function intv(
-    v,
-    d
-){
+function intv(v,d){
     v=parseInt(
         v,
         10
@@ -224,10 +217,7 @@ function episodeCount(a){
     return '—';
 }
 
-function formatDate(
-    ts,
-    time
-){
+function formatDate(ts,time){
     ts=num(ts);
 
     if(!ts){
@@ -283,10 +273,7 @@ function clone(o){
     return r;
 }
 
-function workerUrl(
-    path,
-    p
-){
+function workerUrl(path,p){
     var q=[];
 
     var base=
@@ -376,8 +363,7 @@ function requestJson(
         0
     ){
         options.cache={
-            life:
-                minutes
+            life:minutes
         };
     }
 
@@ -399,8 +385,7 @@ function requestJson(
                             d.error||
                             'Ошибка AnimeHub Worker',
 
-                        data:
-                            d
+                        data:d
                     });
                 }
 
@@ -469,6 +454,186 @@ function cardMask(){
 
 
 /* ============================================================
+ * GENRE NORMALISATION / CACHE FIX
+ * ============================================================ */
+
+function genreRequestUrl(){
+    /*
+     * Lampa's native request cache is URL based.
+     *
+     * Previous AnimeHub versions may already have cached /genres
+     * with correct IDs but blank labels.
+     *
+     * Using ?schema=141 gives Lampa a fresh cache key while still
+     * retaining the fast 24-hour cache afterwards.
+     */
+    return workerUrl(
+        'genres',
+        {
+            schema:
+                GENRE_CACHE_SCHEMA
+        }
+    );
+}
+
+function genreClientTitle(g){
+    if(!g){
+        return '';
+    }
+
+    if(
+        typeof g===
+        'string'
+    ){
+        return clean(g);
+    }
+
+    return clean(
+        g.title||
+        g.name||
+        g.label||
+        g.alias||
+        g.slug||
+        ''
+    );
+}
+
+function genreClientId(g){
+    if(!g){
+        return '';
+    }
+
+    if(
+        typeof g===
+        'string'
+    ){
+        return clean(g);
+    }
+
+    var value=
+        g.value;
+
+    if(
+        value===undefined||
+        value===null||
+        value===''
+    ){
+        value=
+            g.id;
+    }
+
+    if(
+        value===undefined||
+        value===null||
+        value===''
+    ){
+        value=
+            g.href;
+    }
+
+    if(
+        value===undefined||
+        value===null||
+        value===''
+    ){
+        value=
+            g.alias;
+    }
+
+    if(
+        value===undefined||
+        value===null||
+        value===''
+    ){
+        value=
+            g.slug;
+    }
+
+    return (
+        value===undefined||
+        value===null
+    )
+        ?''
+        :String(value);
+}
+
+function normalizeClientGenres(data){
+    var raw=
+        data&&
+        data.genres;
+
+    if(
+        !Array.isArray(raw)
+    ){
+        raw=[];
+    }
+
+    var seen={};
+    var out=[];
+
+    raw.forEach(
+        function(g){
+            var id=
+                genreClientId(g);
+
+            var title=
+                genreClientTitle(g);
+
+            /*
+             * Do not render anonymous cards.
+             * A genre must have both a usable identifier and label.
+             */
+            if(
+                !id||
+                !title
+            ){
+                return;
+            }
+
+            var key=
+                String(id);
+
+            if(
+                seen[key]
+            ){
+                return;
+            }
+
+            seen[key]=true;
+
+            out.push({
+                id:key,
+
+                title:
+                    title,
+
+                alias:
+                    clean(
+                        g&&
+                        g.alias||
+                        ''
+                    ),
+
+                description:
+                    clean(
+                        g&&
+                        (
+                            g.description||
+                            g.desc||
+                            g.about||
+                            g.text||
+                            ''
+                        )
+                    )
+            });
+        }
+    );
+
+    return out;
+}
+
+
+/* ============================================================
  * TORII / STYLE
  * ============================================================ */
 
@@ -482,13 +647,13 @@ function toriiSvg(cls){
         '" viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">'+
 
         '<defs>'+
-            '<linearGradient id="ah140g" x1="0" y1="0" x2="1" y2="1">'+
+            '<linearGradient id="ah141g" x1="0" y1="0" x2="1" y2="1">'+
                 '<stop offset="0" stop-color="#a970ff"/>'+
                 '<stop offset="1" stop-color="#ed5fd4"/>'+
             '</linearGradient>'+
         '</defs>'+
 
-        '<path fill="url(#ah140g)" d="'+
+        '<path fill="url(#ah141g)" d="'+
             'M13 20h70l-3.4 10.5c-20.9 4.1-42.3 4.1-63.2 0L13 20z '+
             'M21 37h54v8H21z '+
             'M29 48h9v29h-9z '+
@@ -500,10 +665,7 @@ function toriiSvg(cls){
     );
 }
 
-function imageElement(
-    url,
-    cls
-){
+function imageElement(url,cls){
     return url
         ?(
             '<img class="'+
@@ -537,14 +699,14 @@ function loaderHtml(t){
 
 function injectStyle(){
     if(
-        $('#animehub-v140-style')
+        $('#animehub-v141-style')
             .length
     ){
         return;
     }
 
     $('head').append(`
-<style id="animehub-v140-style">
+<style id="animehub-v141-style">
 
 .ah140-hero-line{
     padding:0 0 1.2em;
@@ -940,10 +1102,7 @@ function injectStyle(){
  * STORAGE
  * ============================================================ */
 
-function stored(
-    key,
-    def
-){
+function stored(key,def){
     try{
         return Lampa.Storage.get(
             key,
@@ -955,10 +1114,7 @@ function stored(
     }
 }
 
-function setStored(
-    key,
-    v
-){
+function setStored(key,v){
     try{
         Lampa.Storage.set(
             key,
@@ -1048,10 +1204,7 @@ function compactAnime(a){
     };
 }
 
-function sameAnime(
-    a,
-    b
-){
+function sameAnime(a,b){
     if(
         !a||
         !b
@@ -1238,8 +1391,7 @@ function saveWatchState(
     )
     .forEach(
         function(x){
-            v[x]=
-                patch[x];
+            v[x]=patch[x];
         }
     );
 
@@ -1344,10 +1496,7 @@ function baselineYear(st){
     );
 }
 
-function legacyState(
-    mode,
-    value
-){
+function legacyState(mode,value){
     var st=
         defaultCatalogState();
 
@@ -1760,6 +1909,11 @@ function after(fn){
     );
 }
 
+
+/* ============================================================
+ * GENRES CACHE LOADER - V1.4.1 FIX
+ * ============================================================ */
+
 function loadGenres(cb){
     if(genresCache){
         cb(
@@ -1774,15 +1928,24 @@ function loadGenres(cb){
 
     requestJson(
         net,
-        workerUrl(
-            'genres'
-        ),
+
+        genreRequestUrl(),
+
         1440,
 
         function(d){
             genresCache=
-                d.genres||
-                [];
+                normalizeClientGenres(
+                    d
+                );
+
+            if(
+                !genresCache.length
+            ){
+                notify(
+                    'Жанры не найдены'
+                );
+            }
 
             cb(
                 genresCache
@@ -2040,8 +2203,11 @@ function genreFilterMenu(
                 gs.map(
                     function(g){
                         return {
-                            title:g.title,
-                            id:g.id
+                            title:
+                                genreClientTitle(g),
+
+                            id:
+                                genreClientId(g)
                         };
                     }
                 )
@@ -2291,15 +2457,11 @@ function filterMenu(state){
                     key:'season'
                 },
                 {
-                    title:
-                        '✓ Применить',
-
+                    title:'✓ Применить',
                     key:'apply'
                 },
                 {
-                    title:
-                        '↺ Сбросить фильтры',
-
+                    title:'↺ Сбросить фильтры',
                     key:'reset'
                 }
             ],
@@ -2509,10 +2671,7 @@ function filterSummary(st){
  * NATIVE ACTION / ANIME CARDS
  * ============================================================ */
 
-function iconSvg(
-    kind,
-    title
-){
+function iconSvg(kind,title){
     var paths={
         home:
             '<path d="M4 11 12 4l8 7v9h-6v-6h-4v6H4z"/>',
@@ -2566,13 +2725,7 @@ function iconSvg(
                 p+
             '</g>'+
             '<text x="150" y="330" text-anchor="middle" fill="#fff" font-family="sans-serif" font-size="26" font-weight="700">'+
-                esc(
-                    title
-                )
-                .slice(
-                    0,
-                    18
-                )+
+                esc(title).slice(0,18)+
             '</text>'+
         '</svg>';
 
@@ -2692,8 +2845,7 @@ function nativeCard(
             a.poster||
             '',
 
-        source:
-            'animehub',
+        source:'animehub',
 
         ahAnime:a,
 
@@ -2828,6 +2980,11 @@ function lineData(
     };
 }
 
+
+/* ============================================================
+ * GENRE ARTWORK - V1.4.1 FIX
+ * ============================================================ */
+
 function genrePoster(
     title,
     index
@@ -2842,23 +2999,35 @@ function genrePoster(
         4
     ];
 
+    title=
+        clean(title);
+
     var display=
-        String(
-            title||
-            ''
-        )
-        .slice(
-            0,
-            20
-        );
+        title.length>18
+            ?title.slice(
+                0,
+                17
+            )+
+            '…'
+            :title;
 
     var mark=
-        display
+        title
         .charAt(0)
         .toUpperCase();
 
+    var fontSize=
+        display.length>14
+            ?24
+            :(
+                display.length>10
+                    ?27
+                    :31
+            );
+
     var svg=
         '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">'+
+
             '<defs>'+
                 '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'+
                     '<stop stop-color="'+
@@ -2869,14 +3038,35 @@ function genrePoster(
                     '"/>'+
                 '</linearGradient>'+
             '</defs>'+
+
             '<rect width="300" height="450" rx="28" fill="url(#g)"/>'+
+
             '<circle cx="255" cy="70" r="120" fill="#fff" opacity=".09"/>'+
-            '<text x="32" y="220" fill="#fff" fill-opacity=".28" font-family="sans-serif" font-size="120" font-weight="800">'+
+            '<circle cx="255" cy="70" r="72" fill="none" stroke="#fff" stroke-opacity=".14" stroke-width="3"/>'+
+
+            '<text x="28" y="205" '+
+                'fill="#fff" fill-opacity=".24" '+
+                'font-family="sans-serif" font-size="118" font-weight="800">'+
                 esc(mark)+
             '</text>'+
-            '<text x="28" y="330" fill="#fff" font-family="sans-serif" font-size="26" font-weight="700">'+
+
+            '<rect x="20" y="292" width="260" height="118" rx="18" fill="#070914" opacity=".25"/>'+
+
+            '<text x="150" y="350" '+
+                'text-anchor="middle" '+
+                'fill="#fff" '+
+                'font-family="sans-serif" '+
+                'font-size="'+
+                    fontSize+
+                '" '+
+                'font-weight="800">'+
                 esc(display)+
             '</text>'+
+
+            '<path d="m242 382 22 0m-8-8 8 8-8 8" '+
+                'fill="none" stroke="#fff" stroke-width="5" '+
+                'stroke-linecap="round" stroke-linejoin="round"/>'+
+
         '</svg>';
 
     return (
@@ -3014,8 +3204,7 @@ function openDetail(a){
                 a.title||
                 'AnimeHub',
 
-            component:
-                DETAIL,
+            component:DETAIL,
 
             page:1,
 
@@ -3289,6 +3478,7 @@ function CatalogComponent(object){
                     cards.push(
                         actionCard(
                             '← Пред.',
+
                             'Страница '+
                             (
                                 page-
@@ -3375,7 +3565,7 @@ function CatalogComponent(object){
 
 
 /* ============================================================
- * GENRES
+ * GENRES - V1.4.1 FIXED
  * ============================================================ */
 
 function GenresComponent(object){
@@ -3390,13 +3580,34 @@ function GenresComponent(object){
                 ok,
                 fail
             ){
+                /*
+                 * IMPORTANT:
+                 * use genreRequestUrl() rather than plain /genres.
+                 * This bypasses the stale blank-label cache from
+                 * previous AnimeHub versions.
+                 */
                 requestJson(
                     net,
-                    workerUrl(
-                        'genres'
-                    ),
+
+                    genreRequestUrl(),
+
                     1440,
-                    ok,
+
+                    function(data){
+                        var genres=
+                            normalizeClientGenres(
+                                data
+                            );
+
+                        genresCache=
+                            genres;
+
+                        ok({
+                            ok:true,
+                            genres:genres
+                        });
+                    },
+
                     fail
                 );
             },
@@ -3454,23 +3665,56 @@ function GenresComponent(object){
                         g,
                         index
                     ){
+                        var title=
+                            genreClientTitle(
+                                g
+                            );
+
+                        var id=
+                            genreClientId(
+                                g
+                            );
+
+                        /*
+                         * Never create anonymous/blank cards.
+                         */
+                        if(
+                            !title||
+                            !id
+                        ){
+                            return;
+                        }
+
+                        var poster=
+                            genrePoster(
+                                title,
+                                index
+                            );
+
                         var c={
                             id:
                                 'genre_'+
-                                g.id,
+                                id,
 
                             title:
-                                g.title,
+                                title,
+
+                            original_title:
+                                '',
 
                             overview:
                                 g.description||
-                                '',
+                                (
+                                    'Аниме жанра «'+
+                                    title+
+                                    '»'
+                                ),
 
                             poster:
-                                genrePoster(
-                                    g.title,
-                                    index
-                                ),
+                                poster,
+
+                            img:
+                                poster,
 
                             source:
                                 'animehub',
@@ -3487,10 +3731,10 @@ function GenresComponent(object){
                                                 defaultCatalogState();
 
                                             st.genres=
-                                                g.id;
+                                                id;
 
                                             st.genres_title=
-                                                g.title;
+                                                title;
 
                                             openCatalogState(
                                                 st,
@@ -3691,8 +3935,7 @@ function CollectionsComponent(object){
                 return cards;
             },
 
-            title:
-                'Коллекции',
+            title:'Коллекции',
 
             error:
                 'Не удалось загрузить коллекции'
@@ -3976,8 +4219,7 @@ function FavoritesComponent(object){
                 return cards;
             },
 
-            title:
-                'Избранное'
+            title:'Избранное'
         }
     );
 }
@@ -3996,9 +4238,11 @@ function ScheduleComponent(object){
             ){
                 requestJson(
                     net,
+
                     workerUrl(
                         'schedule'
                     ),
+
                     10,
                     ok,
                     fail
@@ -4044,8 +4288,7 @@ function ScheduleComponent(object){
                 return cards;
             },
 
-            title:
-                'Расписание',
+            title:'Расписание',
 
             error:
                 'Не удалось загрузить расписание'
@@ -4651,9 +4894,11 @@ function HomeComponent(object){
 
             requestJson(
                 net,
+
                 workerUrl(
                     'home'
                 ),
+
                 2,
 
                 function(d){
@@ -7884,7 +8129,7 @@ function init(){
         notify(
             'AnimeHub V'+
             VERSION+
-            ' Native Catalogue загружен'
+            ' Genre Fix загружен'
         );
     }
     catch(e){
